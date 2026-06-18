@@ -766,79 +766,252 @@ function updateTipsUI(){document.getElementById('tipsApiHint').style.display=KEY
 function setProgress(title,text,p){document.getElementById('tipsProgress').style.display='block';document.getElementById('tipsProgressTitle').textContent=title;document.getElementById('tipsProgressText').textContent=text;document.getElementById('tipsProgressBar').style.width=p+'%';}
 async function afFetch(ep){const res=await fetch('https://v3.football.api-sports.io'+ep,{headers:{'x-apisports-key':KEYS.af}});if(!res.ok)throw new Error('API error '+res.status);return res.json();}
 
+// Safely extract goal average from API-Football stats — handles all response shapes
+function extractGoalAvg(statsObj,side,context){
+  if(!statsObj||!statsObj.goals)return null;
+  const g=statsObj.goals;
+  const branch=side==='for'?g.for:g.against;
+  if(!branch)return null;
+  // Try average object first
+  if(branch.average){
+    const v=branch.average[context]||branch.average.total||branch.average.home||branch.average.away;
+    const n=parseFloat(v);
+    if(!isNaN(n)&&n>0)return n;
+  }
+  // Fallback: total / games played
+  if(branch.total){
+    const tot=branch.total[context]||branch.total.total;
+    const fp=statsObj.fixtures&&statsObj.fixtures.played;
+    const played=fp&&(fp[context]||fp.total);
+    if(tot!=null&&played>0)return parseFloat(tot)/parseFloat(played);
+  }
+  return null;
+}
+
+// Leagues known to have reliable stats on API-Football free tier
+// Used only to filter OUT leagues with no data — not to rank predictions
+const RELIABLE_LEAGUES=new Set([
+  1,2,3,4,5,          // World Cup, UEFA CL, UEFA EL, UEFA CL Qual, UEFA EL Qual
+  39,40,41,42,43,     // England PL, Championship, L1, L2, National
+  140,141,142,143,    // Spain La Liga, Segunda, etc
+  135,136,            // Italy Serie A, B
+  78,79,              // Germany Bundesliga 1, 2
+  61,62,              // France Ligue 1, 2
+  94,95,              // Portugal Primeira, Segunda
+  88,89,              // Netherlands Eredivisie, Eerste
+  144,145,            // Belgium Pro League
+  235,                // Russia Premier
+  203,                // Turkey Super Lig
+  307,                // Saudi Pro League
+  253,254,            // USA MLS, USL Championship
+  71,72,              // Brazil Serie A, B
+  262,263,            // Mexico Liga MX, Expansion
+  119,120,            // Japan J1, J2
+  292,                // South Korea K League 1
+  169,                // Norway Eliteserien
+  113,                // Sweden Allsvenskan
+  103,                // Norway 1st div
+  207,                // Romania Liga 1
+  197,                // Greece Super League
+  210,                // Hungary OTP Bank Liga
+  218,                // Ukraine Premier
+  233,                // Czech Republic Fortuna Liga
+  848,                // UEFA Conference League
+  244,                // Finland Veikkausliiga
+  271,                // Denmark Superliga
+  383,                // Argentina Liga Profesional
+  128,                // Argentina Primera Nacional
+  239,                // Scotland Premiership
+  179,                // Scotland Championship
+  496,                // UAE Pro League
+  17,                 // World Cup Qualification
+  960,961,            // AFC Champions League
+  257                 // Colombia Liga BetPlay
+]);
+
+// Tier used ONLY as a tiebreaker when confidence scores are equal
+const LEAGUE_TIERS={1:100,2:95,3:92,39:90,140:90,135:90,78:90,61:90,94:85,88:85,71:80,307:80,253:75,848:90,119:70,292:70,197:68,203:68,207:68,262:65,210:65,144:65,235:65,218:65,233:65,17:60,40:75,41:70,42:68,43:65,383:78,239:72,244:60,271:70,496:65};
+function leagueTier(id){return LEAGUE_TIERS[id]||30;}
+function mHomeName(f){return f.teams.home.name;}
+function mAwayName(f){return f.teams.away.name;}
+
+// Robust stat extractor — handles all known API-Football response shapes
+function extractGoalAvg(statsObj,side,context){
+  if(!statsObj||!statsObj.goals)return null;
+  const branch=(side==='for')?statsObj.goals.for:statsObj.goals.against;
+  if(!branch)return null;
+  if(branch.average){
+    const v=branch.average[context]||branch.average.total||branch.average.home||branch.average.away;
+    const n=parseFloat(v);
+    if(!isNaN(n)&&n>0)return n;
+  }
+  if(branch.total){
+    const tot=branch.total[context]!=null?branch.total[context]:branch.total.total;
+    const fp=statsObj.fixtures&&statsObj.fixtures.played;
+    const played=fp&&(fp[context]||fp.total);
+    if(tot!=null&&parseFloat(played)>0)return parseFloat(tot)/parseFloat(played);
+  }
+  return null;
+}
+
 async function fetchDailyTips(){
   if(tipsRunning||!KEYS.af)return;
   tipsRunning=true;
   const btn=document.getElementById('tipsFetchBtn');
   btn.disabled=true;btn.textContent='Scanning…';
-  document.getElementById('tipsErr').textContent='';document.getElementById('tipsList').innerHTML='';document.getElementById('tipsEmpty').style.display='none';
+  document.getElementById('tipsErr').textContent='';
+  document.getElementById('tipsList').innerHTML='';
+  document.getElementById('tipsEmpty').style.display='none';
   const today=new Date().toISOString().slice(0,10);
   const lf=document.getElementById('tipsLeagueFilter').value;
   const cf=document.getElementById('tipsConfidence').value;
   const leagueIds=AF_LEAGUES[lf]||AF_LEAGUES.all;
   try{
-    setProgress('Step 1 of 4 — Fetching fixtures','Scanning leagues for todays matches…',10);
+    setProgress('Step 1 of 4 — Fetching fixtures','Scanning all leagues for today’s matches…',8);
     const fd=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
-    let fixtures=(fd.response||[]).filter(f=>lf==='all'||leagueIds.includes(f.league.id)).filter(f=>['NS','TBD'].includes(f.fixture.status.short)).slice(0,30);
-    if(!fixtures.length){document.getElementById('tipsEmpty').style.display='block';document.getElementById('tipsProgress').style.display='none';return;}
-    setProgress('Step 2 of 4 — Fetching team stats','Found '+fixtures.length+' matches. Getting stats…',30);
-    const season=new Date().getFullYear();
+    // Filter to scheduled fixtures in selected leagues
+    let allFixtures=(fd.response||[])
+      .filter(f=>lf==='all'||leagueIds.includes(f.league.id))
+      .filter(f=>['NS','TBD'].includes(f.fixture.status.short));
+
+    // Remove leagues with no stats coverage on free tier — prevents wasting API calls
+    const eligible=allFixtures.filter(f=>RELIABLE_LEAGUES.has(f.league.id));
+    const total=allFixtures.length;
+    const eligibleCount=eligible.length;
+
+    if(!eligible.length){
+      // No fixtures in known leagues — try everything anyway
+      eligible.push(...allFixtures.slice(0,20));
+    }
+
+    setProgress('Step 1 of 4 — Fetching fixtures','Found '+total+' fixtures worldwide, '+eligibleCount+' in tracked leagues…',15);
+
+    // No pre-sorting by tier — process all eligible fixtures so Poisson decides the ranking
+    // Limit to 22 to stay within free API call budget (22 fixtures x 2 teams = 44 stat calls + injuries)
+    const toProcess=eligible.slice(0,22);
+    if(!toProcess.length){document.getElementById('tipsEmpty').style.display='block';document.getElementById('tipsProgress').style.display='none';return;}
+
+    setProgress('Step 2 of 4 — Fetching team stats','Fetching stats for '+toProcess.length+' matches…',18);
+    const currentYear=new Date().getFullYear();
+    const seasons=[currentYear,currentYear-1];
     const matchData=[];
-    for(let i=0;i<Math.min(fixtures.length,18);i++){
-      const f=fixtures[i];
-      try{
-        const[hs,as]=await Promise.all([afFetch('/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.home.id),afFetch('/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.away.id)]);
-        matchData.push({fixture:f,home:hs.response,away:as.response});
-      }catch(e){matchData.push({fixture:f,home:null,away:null});}
-      setProgress('Step 2 of 4 — Fetching team stats','Match '+(i+1)+' of '+Math.min(fixtures.length,18)+'…',30+Math.round(i/18*25));
+
+    for(let i=0;i<toProcess.length;i++){
+      const f=toProcess[i];
+      let homeStats=null,awayStats=null;
+      // Try current season first, fall back to previous if no games played
+      for(const season of seasons){
+        try{
+          const[hs,as]=await Promise.all([
+            afFetch('/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.home.id),
+            afFetch('/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.away.id)
+          ]);
+          const hPlayed=hs.response&&hs.response.fixtures&&hs.response.fixtures.played;
+          const aPlayed=as.response&&as.response.fixtures&&as.response.fixtures.played;
+          const hG=(hPlayed&&(hPlayed.home||hPlayed.total))||0;
+          const aG=(aPlayed&&(aPlayed.away||aPlayed.total))||0;
+          if(hG>0||aG>0){homeStats=hs.response;awayStats=as.response;break;}
+        }catch(e){}
+      }
+      matchData.push({fixture:f,home:homeStats,away:awayStats,tier:leagueTier(f.league.id)});
+      setProgress('Step 2 of 4 — Fetching team stats',
+        (i+1)+'/'+toProcess.length+': '+mHomeName(f)+' vs '+mAwayName(f),
+        18+Math.round((i+1)/toProcess.length*42));
     }
-    setProgress('Step 3 of 4 — Checking injuries','Fetching injury and suspension data…',60);
+
+    setProgress('Step 3 of 4 — Checking injuries','Fetching injury and suspension reports…',62);
     const injuryMap={};
-    for(let i=0;i<Math.min(matchData.length,8);i++){
+    for(let i=0;i<Math.min(matchData.length,10);i++){
       const f=matchData[i].fixture;
-      try{const inj=await afFetch('/injuries?fixture='+f.fixture.id);injuryMap[f.fixture.id]=inj.response||[];}catch(e){injuryMap[f.fixture.id]=[];}
+      try{const inj=await afFetch('/injuries?fixture='+f.fixture.id);injuryMap[f.fixture.id]=inj.response||[];}
+      catch(e){injuryMap[f.fixture.id]=[];}
     }
+
     setProgress('Step 4 of 4 — Running Poisson models','Calculating scoreline probabilities…',85);
     const predictions=matchData.map(md=>buildTipPrediction(md,injuryMap)).filter(Boolean);
-    predictions.sort((a,b)=>b.confidence-a.confidence);
+
+    // PRIMARY sort: confidence score (highest first) — league tier is tiebreaker only
+    predictions.sort((a,b)=>{
+      const diff=b.confidence-a.confidence;
+      if(Math.abs(diff)>0.005)return diff;  // meaningful confidence gap — use it
+      return b.tier-a.tier;                  // near-identical confidence — use tier as tiebreaker
+    });
+
+    // Apply confidence filter
     let filtered=predictions;
     if(cf==='high')filtered=predictions.filter(p=>p.confidence>0.18);
-    else if(cf==='med')filtered=predictions.filter(p=>p.confidence>0.12);
-    const top10=filtered.slice(0,10);
+    else if(cf==='med')filtered=predictions.filter(p=>p.confidence>0.10);
+
+    // Soft deduplicate — cap same scoreline at 3 appearances
+    const scoreCount={};
+    const deduped=[];
+    for(const p of filtered){
+      const sk=p.top[0].h+'-'+p.top[0].a;
+      scoreCount[sk]=(scoreCount[sk]||0)+1;
+      if(scoreCount[sk]<=3)deduped.push(p);
+    }
+
+    const top10=deduped.slice(0,10);
     document.getElementById('tipsProgress').style.display='none';
     if(!top10.length){document.getElementById('tipsEmpty').style.display='block';return;}
-    renderTips(top10,today);
-  }catch(e){document.getElementById('tipsErr').textContent='Error: '+e.message+'. Check your API-Football key in Settings.';document.getElementById('tipsProgress').style.display='none';}
-  finally{tipsRunning=false;btn.disabled=false;btn.textContent='🔥 Generate Todays Tips';}
+    renderTips(top10,today,total,eligibleCount);
+  }catch(e){
+    document.getElementById('tipsErr').textContent='Error: '+e.message+'. Check your API-Football key in Settings.';
+    document.getElementById('tipsProgress').style.display='none';
+  }
+  finally{tipsRunning=false;btn.disabled=false;btn.textContent='🔥 Generate Today’s Tips';}
 }
 
 function buildTipPrediction(md,injuryMap){
   const f=md.fixture;
-  const homeName=f.teams.home.name,awayName=f.teams.away.name;
+  const hName=f.teams.home.name,aName=f.teams.away.name;
   const leagueName=f.league.name,country=f.league.country;
   const ko=f.fixture.date;
-  const neutralKeywords=['World Cup','Nations League','Euro ','Copa America','African Cup','Gold Cup','Asian Cup','Olympics'];
+  const tier=md.tier||30;
+  const neutralKeywords=['World Cup','Nations League','Euro ','Copa America','African Cup','Gold Cup','Asian Cup','Olympics','International'];
   const venue=neutralKeywords.some(n=>leagueName.includes(n))?'neutral':'home';
-  let homeAtk=1.5,homeDef=1.1,awayAtk=1.1,awayDef=1.5;
-  if(md.home&&md.home.goals){homeAtk=parseFloat(md.home.goals.for?.average?.home)||1.5;homeDef=parseFloat(md.home.goals.against?.average?.home)||1.1;}
-  if(md.away&&md.away.goals){awayAtk=parseFloat(md.away.goals.for?.average?.away)||1.1;awayDef=parseFloat(md.away.goals.against?.average?.away)||1.5;}
-  let{lHome,lAway}=calcLambdas(homeAtk,homeDef,awayAtk,awayDef,1.5,1.1,venue);
+  // Tier-adjusted league averages for Poisson baseline
+  const lgH=tier>=85?1.55:tier>=70?1.45:1.35;
+  const lgA=tier>=85?1.15:tier>=70?1.10:1.05;
+  // Extract stats — try match context first, fall back to overall totals
+  const homeAtk=extractGoalAvg(md.home,'for','home')||extractGoalAvg(md.home,'for','total')||null;
+  const homeDef=extractGoalAvg(md.home,'against','home')||extractGoalAvg(md.home,'against','total')||null;
+  const awayAtk=extractGoalAvg(md.away,'for','away')||extractGoalAvg(md.away,'for','total')||null;
+  const awayDef=extractGoalAvg(md.away,'against','away')||extractGoalAvg(md.away,'against','total')||null;
+  const hasStats=!!(homeAtk&&homeDef&&awayAtk&&awayDef);
+  // No real stats — skip this match entirely rather than faking a prediction
+  if(!hasStats)return null;
+  // Sanity clamp — stops outlier stats distorting the model
+  const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
+  const hAtk=clamp(homeAtk,0.3,5.0);
+  const hDef=clamp(homeDef,0.3,5.0);
+  const aAtk=clamp(awayAtk,0.3,5.0);
+  const aDef=clamp(awayDef,0.3,5.0);
+  let{lHome,lAway}=calcLambdas(hAtk,hDef,aAtk,aDef,lgH,lgA,venue);
+  // Apply injury reductions
   const injuries=injuryMap[f.fixture.id]||[];
-  const hi=injuries.filter(i=>i.team?.id===f.teams.home.id);
-  const ai=injuries.filter(i=>i.team?.id===f.teams.away.id);
+  const hi=injuries.filter(i=>i.team&&i.team.id===f.teams.home.id);
+  const ai=injuries.filter(i=>i.team&&i.team.id===f.teams.away.id);
   const injuryTags=[];
-  if(hi.length>0){lHome=Math.max(0.1,lHome*(1-Math.min(hi.length*0.04,0.2)));injuryTags.push(homeName+': '+hi.length+' doubt'+(hi.length>1?'s':''));}
-  if(ai.length>0){lAway=Math.max(0.1,lAway*(1-Math.min(ai.length*0.04,0.2)));injuryTags.push(awayName+': '+ai.length+' doubt'+(ai.length>1?'s':''));}
+  if(hi.length>0){lHome=Math.max(0.2,lHome*(1-Math.min(hi.length*0.05,0.25)));injuryTags.push(hName+': '+hi.length+' doubt'+(hi.length>1?'s':''));}
+  if(ai.length>0){lAway=Math.max(0.2,lAway*(1-Math.min(ai.length*0.05,0.25)));injuryTags.push(aName+': '+ai.length+' doubt'+(ai.length>1?'s':''));}
   const matrix=buildMatrix(lHome,lAway,6);
   const outcomes=calcOutcomes(matrix,6);
   const top=topN(matrix,6,6);
-  const detail='Expected goals: '+homeName+' '+lHome.toFixed(2)+' \u2014 '+awayName+' '+lAway.toFixed(2)+'\n\nOutcomes:\n'+homeName+' win: '+pct(outcomes.hw)+'\nDraw: '+pct(outcomes.d)+'\n'+awayName+' win: '+pct(outcomes.aw)+(injuryTags.length?'\n\nInjury flags:\n'+injuryTags.join('\n'):'')+'\n\nVenue: '+(venue==='neutral'?'Neutral \u2014 home advantage removed':'Standard home/away');
-  return{homeName,awayName,leagueName,country,ko,venue,lHome,lAway,top,outcomes,confidence:top[0].p,injuryTags,hasStats:!!(md.home&&md.away),detail};
+  const detail='Expected goals: '+hName+' '+lHome.toFixed(2)+' — '+aName+' '+lAway.toFixed(2)
+    +'\n\nSeason stats (per game):\n  '+hName+': '+hAtk.toFixed(2)+' scored, '+hDef.toFixed(2)+' conceded (home)'
+    +'\n  '+aName+': '+aAtk.toFixed(2)+' scored, '+aDef.toFixed(2)+' conceded (away)'
+    +'\n\nOutcome probabilities:\n  '+hName+' win: '+pct(outcomes.hw)
+    +'\n  Draw: '+pct(outcomes.d)
+    +'\n  '+aName+' win: '+pct(outcomes.aw)
+    +(injuryTags.length?'\n\nInjury/doubt flags:\n  '+injuryTags.join('\n  '):'')
+    +'\n\nVenue: '+(venue==='neutral'?'Neutral — home advantage removed':'Standard home/away')
+    +'\nLeague tier: '+tier+'/100 (tiebreaker only)';
+  return{homeName:hName,awayName:aName,leagueName,country,ko,venue,lHome,lAway,top,outcomes,confidence:top[0].p,injuryTags,hasStats,tier,detail};
 }
-
-function renderTips(tips,date){
+function renderTips(tips,date,totalFound,eligibleCount){
   const ds=new Date(date).toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
-  let html='<div style="margin-bottom:16px"><div class="tips-date">📅 '+ds+'</div><div class="tips-meta">'+tips.length+' predictions · API-Football + Poisson model</div></div>';
+  let html='<div style="margin-bottom:16px"><div class="tips-date">📅 '+ds+'</div><div class="tips-meta">Top '+tips.length+' predictions from '+(eligibleCount||totalFound||'?')+' matches analysed · Ranked by Poisson confidence + confidence</div></div>';
   tips.forEach((t,i)=>{
     const rank=i+1;const rc=rank===1?'tip-rank-1':rank===2?'tip-rank-2':rank===3?'tip-rank-3':'tip-rank-n';
     const cp=(t.confidence*100).toFixed(1);const cc=t.confidence>0.18?'conf-high':t.confidence>0.12?'conf-med':'conf-low';const col=t.confidence>0.18?'var(--green)':t.confidence>0.12?'var(--draw)':'var(--orange)';
