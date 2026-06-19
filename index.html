@@ -915,6 +915,7 @@ async function fetchDailyTips(){
     const total=allFixtures.length;
 
     if(!total){
+      document.getElementById('tipsErr').textContent='No fixtures returned by the API for today ('+today+'). This usually means the API key has no requests left, or there genuinely are no scheduled matches in this filter today.';
       document.getElementById('tipsEmpty').style.display='block';
       document.getElementById('tipsProgress').style.display='none';
       return;
@@ -1024,8 +1025,12 @@ async function fetchDailyTips(){
 
     const top10=deduped.slice(0,10);
     document.getElementById('tipsProgress').style.display='none';
-    if(!top10.length){document.getElementById('tipsEmpty').style.display='block';return;}
-    renderTips(top10,today,total,eligibleCount);
+    if(!top10.length){
+      document.getElementById('tipsErr').textContent='Found '+total+' fixtures and processed '+toProcess.length+' of them, but '+matchData.length+' returned no usable team stats from the API (predictions skipped to avoid showing fake data), and '+predictions.length+' passed stats but were filtered out by your confidence setting. Try setting Confidence Level to \'Show All\', or check back when more fixtures have stats published closer to kick-off.';
+      document.getElementById('tipsEmpty').style.display='block';
+      return;
+    }
+    renderTips(top10,today,total,toProcess.length);
   }catch(e){
     document.getElementById('tipsErr').textContent='Error: '+e.message+'. Check your API-Football key in Settings.';
     document.getElementById('tipsProgress').style.display='none';
