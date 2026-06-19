@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v9</span>
+    <span class="badge">v10</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -272,6 +272,10 @@ th{color:var(--muted);font-weight:700}
     </div>
     <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
     <p class="hint" id="tipsApiHint" style="display:none">⚠️ Add your API-Football key in ⚙️ Settings to enable this feature</p>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
+      <input type="checkbox" id="tipsDebugToggle" style="width:auto" onchange="window.SE_DEBUG_ENABLED=this.checked">
+      <span style="font-size:11px;color:var(--dim)">Show raw API debug data (for troubleshooting)</span>
+    </label>
   </div>
   <div id="tipsProgress" style="display:none" class="tips-progress">
     <div class="tips-progress-title" id="tipsProgressTitle">Scanning leagues…</div>
@@ -279,6 +283,10 @@ th{color:var(--muted);font-weight:700}
     <div class="tips-progress-bar-wrap"><div class="tips-progress-bar" id="tipsProgressBar" style="width:0%"></div></div>
   </div>
   <div id="tipsErr" class="err" style="margin-bottom:12px"></div>
+  <div id="tipsDebugPanel" style="display:none" class="card">
+    <div class="card-title">🔧 Debug — Raw API Response (First Match Attempted)</div>
+    <div id="tipsDebugContent" style="font-size:10px;color:#aaccdd;white-space:pre-wrap;line-height:1.5;max-height:400px;overflow-y:auto;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px;font-family:monospace"></div>
+  </div>
   <div id="tipsList"></div>
   <div id="tipsEmpty" class="tips-empty" style="display:none">
     <div class="tips-empty-icon">📭</div>
@@ -886,6 +894,8 @@ async function fetchDailyTips(){
   document.getElementById('tipsErr').textContent='';
   document.getElementById('tipsList').innerHTML='';
   document.getElementById('tipsEmpty').style.display='none';
+  document.getElementById('tipsDebugPanel').style.display='none';
+  window.SE_DEBUG={captured:false};
   // Verify key before running full scan
   setProgress('Verifying API key…','Checking your API-Football connection…',5);
   const keyCheck=await verifyAfKey();
@@ -969,16 +979,29 @@ async function fetchDailyTips(){
         // Try current season first, fall back to previous if mid-season changeover
         for(const season of seasons){
           try{
-            const[hs,as]=await Promise.all([
-              afFetch('/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.home.id),
-              afFetch('/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.away.id)
-            ]);
+            const hUrl='/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.home.id;
+            const aUrl='/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.away.id;
+            const[hs,as]=await Promise.all([afFetch(hUrl),afFetch(aUrl)]);
+            // Capture the very first attempt's raw response for debugging, regardless of success
+            if(window.SE_DEBUG&&!window.SE_DEBUG.captured){
+              window.SE_DEBUG.captured=true;
+              window.SE_DEBUG.fixture=f.teams.home.name+' vs '+f.teams.away.name+' ('+f.league.name+', league '+f.league.id+', season '+season+')';
+              window.SE_DEBUG.homeUrl=hUrl;
+              window.SE_DEBUG.homeRaw=hs;
+              window.SE_DEBUG.awayRaw=as;
+            }
             const hPlayed=hs.response&&hs.response.fixtures&&hs.response.fixtures.played;
             const aPlayed=as.response&&as.response.fixtures&&as.response.fixtures.played;
             const hG=(hPlayed&&(hPlayed.home||hPlayed.total))||0;
             const aG=(aPlayed&&(aPlayed.away||aPlayed.total))||0;
             if(hG>0||aG>0){homeStats=hs.response;awayStats=as.response;break;}
-          }catch(e){}
+          }catch(e){
+            if(window.SE_DEBUG&&!window.SE_DEBUG.captured){
+              window.SE_DEBUG.captured=true;
+              window.SE_DEBUG.fixture=f.teams.home.name+' vs '+f.teams.away.name+' ('+f.league.name+', league '+f.league.id+', season '+season+')';
+              window.SE_DEBUG.error=e.message;
+            }
+          }
         }
       }
 
@@ -990,6 +1013,20 @@ async function fetchDailyTips(){
         15+Math.round((i+1)/toProcess.length*45));
     }
 
+
+    // Show debug panel if enabled, regardless of outcome
+    if(window.SE_DEBUG_ENABLED&&window.SE_DEBUG&&window.SE_DEBUG.captured){
+      const dbg=window.SE_DEBUG;
+      let dbgText='FIXTURE TESTED: '+dbg.fixture+'\n\nREQUEST URL:\n'+(dbg.homeUrl||'n/a')+'\n\n';
+      if(dbg.error){
+        dbgText+='REQUEST FAILED WITH ERROR:\n'+dbg.error;
+      } else {
+        dbgText+='HOME TEAM RAW RESPONSE:\n'+JSON.stringify(dbg.homeRaw,null,2).slice(0,3000);
+        dbgText+='\n\nAWAY TEAM RAW RESPONSE:\n'+JSON.stringify(dbg.awayRaw,null,2).slice(0,1500);
+      }
+      document.getElementById('tipsDebugContent').textContent=dbgText;
+      document.getElementById('tipsDebugPanel').style.display='block';
+    }
 
     setProgress('Step 3 of 4 — Checking injuries','Fetching injury and suspension reports…',62);
     const injuryMap={};
