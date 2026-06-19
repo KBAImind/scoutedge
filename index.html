@@ -764,7 +764,34 @@ const AF_LEAGUES={all:[39,140,135,78,61,94,88,40,41,42,43,71,307,253,1,2,3,848,1
 
 function updateTipsUI(){document.getElementById('tipsApiHint').style.display=KEYS.af?'none':'block';document.getElementById('tipsFetchBtn').disabled=!KEYS.af;}
 function setProgress(title,text,p){document.getElementById('tipsProgress').style.display='block';document.getElementById('tipsProgressTitle').textContent=title;document.getElementById('tipsProgressText').textContent=text;document.getElementById('tipsProgressBar').style.width=p+'%';}
-async function afFetch(ep){const res=await fetch('https://v3.football.api-sports.io'+ep,{headers:{'x-apisports-key':KEYS.af}});if(!res.ok)throw new Error('API error '+res.status);return res.json();}
+async function afFetch(ep){
+  // Try api-sports direct first, fall back to RapidAPI gateway
+  // RapidAPI gateway supports CORS from browser — direct endpoint may not
+  const urls=[
+    {url:'https://v3.football.api-sports.io'+ep, headers:{'x-apisports-key':KEYS.af}},
+    {url:'https://api-football-v1.p.rapidapi.com/v3'+ep, headers:{'x-rapidapi-key':KEYS.af,'x-rapidapi-host':'api-football-v1.p.rapidapi.com'}}
+  ];
+  let lastErr=null;
+  for(const{url,headers} of urls){
+    try{
+      const res=await fetch(url,{method:'GET',headers});
+      if(res.ok){const d=await res.json();if(d&&(d.response||d.errors))return d;}
+    }catch(e){lastErr=e;}
+  }
+  throw new Error(lastErr?lastErr.message:'All API endpoints failed. Check your API-Football key in Settings.');
+}
+
+// Verify the API key works before running the full scan
+async function verifyAfKey(){
+  try{
+    const d=await afFetch('/status');
+    const sub=d.response&&d.response.subscription;
+    const reqs=d.response&&d.response.requests;
+    if(sub){return{ok:true,plan:sub.plan,remaining:reqs?(reqs.limit_day-reqs.current):null};}
+    if(d.errors&&Object.keys(d.errors).length>0)return{ok:false,msg:JSON.stringify(d.errors)};
+    return{ok:true};
+  }catch(e){return{ok:false,msg:e.message};}
+}
 
 // Safely extract goal average from API-Football stats — handles all response shapes
 function extractGoalAvg(statsObj,side,context){
@@ -859,6 +886,18 @@ async function fetchDailyTips(){
   document.getElementById('tipsErr').textContent='';
   document.getElementById('tipsList').innerHTML='';
   document.getElementById('tipsEmpty').style.display='none';
+  // Verify key before running full scan
+  setProgress('Verifying API key…','Checking your API-Football connection…',5);
+  const keyCheck=await verifyAfKey();
+  if(!keyCheck.ok){
+    document.getElementById('tipsErr').textContent='❌ API key error: '+keyCheck.msg+'. Go to ⚙️ Settings and re-enter your API-Football key.';
+    document.getElementById('tipsProgress').style.display='none';
+    tipsRunning=false;btn.disabled=false;btn.textContent='🔥 Generate Today’s Tips';
+    return;
+  }
+  if(keyCheck.remaining!==null&&keyCheck.remaining<10){
+    document.getElementById('tipsErr').textContent='⚠️ Only '+keyCheck.remaining+' API calls remaining today. Results may be limited.';
+  }
   const today=new Date().toISOString().slice(0,10);
   const lf=document.getElementById('tipsLeagueFilter').value;
   const cf=document.getElementById('tipsConfidence').value;
@@ -1169,7 +1208,7 @@ window.onload=()=>{
   initRunners();initLegs();
 };
 
-function saveKeys(){KEYS.af=document.getElementById('afApiKey').value.trim();KEYS.oddsApi=document.getElementById('oddsApiKey').value.trim();KEYS.fd=document.getElementById('fdApiKey').value.trim();try{localStorage.setItem('se_keys',JSON.stringify(KEYS))}catch{}const t=document.getElementById('saveToast');t.style.display='block';setTimeout(()=>t.style.display='none',2500);updateLiveBadge();updateUIForKeys();updateTipsUI();}
+function saveKeys(){KEYS.af=document.getElementById('afApiKey').value.trim();KEYS.oddsApi=document.getElementById('oddsApiKey').value.trim();KEYS.fd=document.getElementById('fdApiKey').value.trim();try{localStorage.setItem('se_keys',JSON.stringify(KEYS))}catch{console.warn('localStorage unavailable — keys not persisted');}const t=document.getElementById('saveToast');t.style.display='block';setTimeout(()=>t.style.display='none',2500);updateLiveBadge();updateUIForKeys();updateTipsUI();}
 function updateLiveBadge(){document.getElementById('liveBadge').style.display=(KEYS.oddsApi||KEYS.fd||KEYS.af)?'inline':'none';}
 function updateUIForKeys(){document.getElementById('fdHint').style.display=KEYS.fd?'none':'block';updateLoadMatchesBtn();}
 
