@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v11</span>
+    <span class="badge">v4</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -271,6 +271,7 @@ th{color:var(--muted);font-weight:700}
       <div><label>Confidence Level</label><select id="tipsConfidence"><option value="any">Show All</option><option value="med" selected>Medium+</option><option value="high">High Only</option></select></div>
     </div>
     <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
+    <p class="hint" style="margin-top:6px">⏱️ Takes 2-3 minutes — the free API tier limits how fast we can ask for data</p>
     <p class="hint" id="tipsApiHint" style="display:none">⚠️ Add your API-Football key in ⚙️ Settings to enable this feature</p>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
       <input type="checkbox" id="tipsDebugToggle" style="width:auto" onchange="window.SE_DEBUG_ENABLED=this.checked">
@@ -779,7 +780,20 @@ function setProgress(title,text,p){document.getElementById('tipsProgress').style
 // relays the request and attaches the missing CORS headers to the response.
 const CORS_PROXY='https://corsproxy.io/?url=';
 
-async function afFetch(ep){
+// Free tier allows only 10 requests/minute (6.5s gap minimum).
+// We pace at 1 request every 6.5 seconds and retry once on a 429 with backoff.
+let SE_LAST_CALL=0;
+const SE_MIN_GAP_MS=6500;
+
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+async function afFetch(ep,isRetry){
+  // Enforce minimum gap since the last request
+  const now=Date.now();
+  const wait=SE_LAST_CALL+SE_MIN_GAP_MS-now;
+  if(wait>0)await sleep(wait);
+  SE_LAST_CALL=Date.now();
+
   const targetUrl='https://v3.football.api-sports.io'+ep;
   const proxiedUrl=CORS_PROXY+encodeURIComponent(targetUrl);
   try{
@@ -787,7 +801,14 @@ async function afFetch(ep){
     if(!res.ok)throw new Error('API error '+res.status);
     const d=await res.json();
     if(d&&d.errors&&Array.isArray(d.errors)===false&&Object.keys(d.errors).length>0){
-      throw new Error(JSON.stringify(d.errors));
+      const errStr=JSON.stringify(d.errors);
+      // If rate-limited, wait longer and retry once automatically
+      if(!isRetry&&/rate|too many requests/i.test(errStr)){
+        await sleep(10000);
+        SE_LAST_CALL=Date.now();
+        return afFetch(ep,true);
+      }
+      throw new Error(errStr);
     }
     return d;
   }catch(e){
@@ -944,7 +965,9 @@ async function fetchDailyTips(){
     // Process up to 25 fixtures within the free API budget
     // Each fixture = 2 stat calls (home + away) so 25 fixtures = 50 calls max
     // We have 100/day — this leaves headroom for injury calls and retries
-    const toProcess=allFixtures.slice(0,25);
+    // Capped at 12 fixtures (24 stat calls) to keep the scan under ~3 minutes
+    // given the free tier's 10 requests/minute limit (6.5s required between calls)
+    const toProcess=allFixtures.slice(0,12);
 
     setProgress('Step 1 of 4 — Fetching fixtures',
       'Found '+total+' fixtures worldwide. Processing top '+toProcess.length+' by league quality…',15);
@@ -966,10 +989,10 @@ async function fetchDailyTips(){
           if(homeStats&&awayStats)break;
           for(const season of seasons){
             try{
-              const[hs,as]=await Promise.all([
-                afFetch('/teams/statistics?league='+lid+'&season='+season+'&team='+f.teams.home.id),
-                afFetch('/teams/statistics?league='+lid+'&season='+season+'&team='+f.teams.away.id)
-              ]);
+              // Sequential, not Promise.all — parallel calls would both pass the
+              // rate-limit gap check before either updates it, bursting past 10/min
+              const hs=await afFetch('/teams/statistics?league='+lid+'&season='+season+'&team='+f.teams.home.id);
+              const as=await afFetch('/teams/statistics?league='+lid+'&season='+season+'&team='+f.teams.away.id);
               const hP=hs.response&&hs.response.fixtures&&hs.response.fixtures.played;
               const aP=as.response&&as.response.fixtures&&as.response.fixtures.played;
               const hG=(hP&&(hP.home||hP.away||hP.total))||0;
@@ -987,7 +1010,9 @@ async function fetchDailyTips(){
           try{
             const hUrl='/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.home.id;
             const aUrl='/teams/statistics?league='+f.league.id+'&season='+season+'&team='+f.teams.away.id;
-            const[hs,as]=await Promise.all([afFetch(hUrl),afFetch(aUrl)]);
+            // Sequential, not Promise.all — see note above
+            const hs=await afFetch(hUrl);
+            const as=await afFetch(aUrl);
             // Capture the very first attempt's raw response for debugging, regardless of success
             if(window.SE_DEBUG&&!window.SE_DEBUG.captured){
               window.SE_DEBUG.captured=true;
@@ -1036,7 +1061,7 @@ async function fetchDailyTips(){
 
     setProgress('Step 3 of 4 — Checking injuries','Fetching injury and suspension reports…',62);
     const injuryMap={};
-    for(let i=0;i<Math.min(matchData.length,10);i++){
+    for(let i=0;i<Math.min(matchData.length,6);i++){
       const f=matchData[i].fixture;
       try{const inj=await afFetch('/injuries?fixture='+f.fixture.id);injuryMap[f.fixture.id]=inj.response||[];}
       catch(e){injuryMap[f.fixture.id]=[];}
