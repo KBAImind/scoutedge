@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v12</span>
+    <span class="badge">v14</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -270,7 +270,10 @@ th{color:var(--muted);font-weight:700}
       <div><label>League Filter</label><select id="tipsLeagueFilter"><option value="all">All Leagues Worldwide</option><option value="major">Major Leagues Only</option><option value="europe">European Leagues</option></select></div>
       <div><label>Confidence Level</label><select id="tipsConfidence"><option value="any">Show All</option><option value="med" selected>Medium+</option><option value="high">High Only</option></select></div>
     </div>
-    <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
+      <button class="btn btn-ghost" id="tipsCancelBtn" onclick="cancelDailyTips()" style="display:none;flex:0 0 auto;width:auto;padding:12px 18px">✕ Cancel</button>
+    </div>
     <p class="hint" style="margin-top:6px">⏱️ Takes 2-3 minutes — the free API tier limits how fast we can ask for data</p>
     <p class="hint" id="tipsApiHint" style="display:none">⚠️ Add your API-Football key in ⚙️ Settings to enable this feature</p>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
@@ -703,6 +706,10 @@ th{color:var(--muted);font-weight:700}
 <div id="tab-settings" class="section">
   <div class="card">
     <div class="card-title">API Keys</div>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding:10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;cursor:pointer">
+      <input type="checkbox" id="paidTierToggle" style="width:auto" onchange="window.SE_PAID_TIER=this.checked;try{localStorage.setItem('se_paid_tier',this.checked)}catch{}">
+      <span style="font-size:11px;color:var(--muted)">I have a paid API-Football plan (unlocks current season stats — Daily Tips will be faster and more accurate)</span>
+    </label>
     <p class="section-sub">Both are free. Instructions below — takes about 2 minutes each.</p>
     <div class="field"><label>🔥 API-Football Key (api-football.com) — Powers Daily Tips</label><input type="password" id="afApiKey" placeholder="Paste your API-Football key here"></div>
     <p class="hint" style="margin-bottom:12px">Free tier: 100 calls/day · 900+ leagues · Injuries · Live lineups · Worldwide</p>
@@ -769,6 +776,16 @@ const KEYS=(()=>{try{return JSON.parse(localStorage.getItem('se_keys')||'{}')}ca
 
 // ═══ DAILY TIPS ═══════════════════════════════════
 let tipsRunning=false;
+let tipsCancelled=false;
+
+function cancelDailyTips(){
+  tipsCancelled=true;
+  document.getElementById('tipsCancelBtn').style.display='none';
+  setProgress('Cancelling…','Stopping after the current request finishes…',100);
+}
+
+// Custom error used to unwind out of the scan cleanly when cancelled
+class SECancelled extends Error{constructor(){super('Cancelled by user');this.name='SECancelled';}}
 const AF_LEAGUES={all:[39,140,135,78,61,94,88,40,41,42,43,71,307,253,1,2,3,848,119,292,169,197,203,207,262,210,144,235,218,233,17],major:[39,140,135,78,61,1,2,88,94,71,307,253],europe:[39,140,135,78,61,94,88,40,41,42,43,1,2,3,848,119,292,197,203,207,233,218,235]};
 
 function updateTipsUI(){document.getElementById('tipsApiHint').style.display=KEYS.af?'none':'block';document.getElementById('tipsFetchBtn').disabled=!KEYS.af;}
@@ -787,11 +804,26 @@ const SE_MIN_GAP_MS=6500;
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
+// Sleeps in short chunks so a cancel request is honoured within ~300ms
+// instead of waiting out the full 6.5s/10s gap
+async function cancellableSleep(ms){
+  const step=300;
+  let elapsed=0;
+  while(elapsed<ms){
+    if(tipsCancelled)throw new SECancelled();
+    const chunk=Math.min(step,ms-elapsed);
+    await sleep(chunk);
+    elapsed+=chunk;
+  }
+}
+
 async function afFetch(ep,isRetry){
   // Enforce minimum gap since the last request
   const now=Date.now();
   const wait=SE_LAST_CALL+SE_MIN_GAP_MS-now;
-  if(wait>0)await sleep(wait);
+  if(tipsCancelled)throw new SECancelled();
+  if(wait>0)await cancellableSleep(wait);
+  if(tipsCancelled)throw new SECancelled();
   SE_LAST_CALL=Date.now();
 
   const targetUrl='https://v3.football.api-sports.io'+ep;
@@ -804,7 +836,7 @@ async function afFetch(ep,isRetry){
       const errStr=JSON.stringify(d.errors);
       // If rate-limited, wait longer and retry once automatically
       if(!isRetry&&/rate|too many requests/i.test(errStr)){
-        await sleep(10000);
+        await cancellableSleep(10000);
         SE_LAST_CALL=Date.now();
         return afFetch(ep,true);
       }
@@ -916,8 +948,10 @@ function extractGoalAvg(statsObj,side,context){
 async function fetchDailyTips(){
   if(tipsRunning||!KEYS.af)return;
   tipsRunning=true;
+  tipsCancelled=false;
   const btn=document.getElementById('tipsFetchBtn');
   btn.disabled=true;btn.textContent='Scanning…';
+  document.getElementById('tipsCancelBtn').style.display='inline-block';
   document.getElementById('tipsErr').textContent='';
   document.getElementById('tipsList').innerHTML='';
   document.getElementById('tipsEmpty').style.display='none';
@@ -967,16 +1001,23 @@ async function fetchDailyTips(){
     // We have 100/day — this leaves headroom for injury calls and retries
     // Capped at 12 fixtures (24 stat calls) to keep the scan under ~3 minutes
     // given the free tier's 10 requests/minute limit (6.5s required between calls)
-    const toProcess=allFixtures.slice(0,12);
+    // 15 fixtures × 2 calls = 30 stat calls. With the season fix below (1 attempt
+    // instead of 2), this now takes roughly the same time the old 12-fixture version did.
+    const toProcess=allFixtures.slice(0,15);
 
     setProgress('Step 1 of 4 — Fetching fixtures',
       'Found '+total+' fixtures worldwide. Processing top '+toProcess.length+' by league quality…',15);
 
     const currentYear=new Date().getFullYear();
-    const seasons=[currentYear,currentYear-1];
+    // Free tier only serves stats for seasons 2022-2024 — current/previous year
+    // always fails on free plans, wasting calls and time. Go straight to what works.
+    const FREE_TIER_SEASON=2024;
+    const isFreeTier=!window.SE_PAID_TIER; // toggled in Settings if user upgrades
+    const seasons=isFreeTier?[FREE_TIER_SEASON]:[currentYear,currentYear-1,FREE_TIER_SEASON];
     const matchData=[];
 
     for(let i=0;i<toProcess.length;i++){
+      if(tipsCancelled)throw new SECancelled();
       const f=toProcess[i];
       let homeStats=null,awayStats=null;
       const isIntl=INTERNATIONAL_LEAGUES.has(f.league.id);
@@ -1039,8 +1080,11 @@ async function fetchDailyTips(){
       // Note: if stats are null here, buildTipPrediction will return null and
       // the match is skipped — no fake predictions ever shown
       matchData.push({fixture:f,home:homeStats,away:awayStats,tier:leagueTier(f.league.id),isIntl});
+      const remaining=toProcess.length-(i+1);
+      const etaSec=Math.round(remaining*2*(SE_MIN_GAP_MS/1000));
+      const etaText=etaSec>60?Math.ceil(etaSec/60)+' min left':etaSec+'s left';
       setProgress('Step 2 of 4 — Fetching team stats',
-        (i+1)+'/'+toProcess.length+': '+mHomeName(f)+' vs '+mAwayName(f)+' ('+f.league.name+')',
+        (i+1)+'/'+toProcess.length+': '+mHomeName(f)+' vs '+mAwayName(f)+' ('+f.league.name+') · ~'+etaText,
         15+Math.round((i+1)/toProcess.length*45));
     }
 
@@ -1062,6 +1106,7 @@ async function fetchDailyTips(){
     setProgress('Step 3 of 4 — Checking injuries','Fetching injury and suspension reports…',62);
     const injuryMap={};
     for(let i=0;i<Math.min(matchData.length,6);i++){
+      if(tipsCancelled)throw new SECancelled();
       const f=matchData[i].fixture;
       try{const inj=await afFetch('/injuries?fixture='+f.fixture.id);injuryMap[f.fixture.id]=inj.response||[];}
       catch(e){injuryMap[f.fixture.id]=[];}
@@ -1100,10 +1145,19 @@ async function fetchDailyTips(){
     }
     renderTips(top10,today,total,toProcess.length);
   }catch(e){
-    document.getElementById('tipsErr').textContent='Error: '+e.message+'. Check your API-Football key in Settings.';
-    document.getElementById('tipsProgress').style.display='none';
+    if(e instanceof SECancelled||e.name==='SECancelled'){
+      document.getElementById('tipsErr').textContent='⏹️ Scan cancelled. No tips were generated.';
+      document.getElementById('tipsProgress').style.display='none';
+    } else {
+      document.getElementById('tipsErr').textContent='Error: '+e.message+'. Check your API-Football key in Settings.';
+      document.getElementById('tipsProgress').style.display='none';
+    }
   }
-  finally{tipsRunning=false;btn.disabled=false;btn.textContent='🔥 Generate Today’s Tips';}
+  finally{
+    tipsRunning=false;tipsCancelled=false;
+    btn.disabled=false;btn.textContent='🔥 Generate Today’s Tips';
+    document.getElementById('tipsCancelBtn').style.display='none';
+  }
 }
 
 function buildTipPrediction(md,injuryMap){
@@ -1276,6 +1330,10 @@ window.onload=()=>{
   if(KEYS.af)document.getElementById('afApiKey').value=KEYS.af;
   if(KEYS.oddsApi)document.getElementById('oddsApiKey').value=KEYS.oddsApi;
   if(KEYS.fd)document.getElementById('fdApiKey').value=KEYS.fd;
+  try{
+    const paidPref=localStorage.getItem('se_paid_tier');
+    if(paidPref==='true'){window.SE_PAID_TIER=true;document.getElementById('paidTierToggle').checked=true;}
+  }catch{}
   updateLiveBadge();updateUIForKeys();updateTipsUI();
   setSport('football',document.querySelector('.sport-pill.active'));
   initRunners();initLegs();
