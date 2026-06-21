@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v14</span>
+    <span class="badge">v16</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -274,7 +274,6 @@ th{color:var(--muted);font-weight:700}
       <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
       <button class="btn btn-ghost" id="tipsCancelBtn" onclick="cancelDailyTips()" style="display:none;flex:0 0 auto;width:auto;padding:12px 18px">✕ Cancel</button>
     </div>
-    <p class="hint" style="margin-top:6px">⏱️ Takes 2-3 minutes — the free API tier limits how fast we can ask for data</p>
     <p class="hint" id="tipsApiHint" style="display:none">⚠️ Add your API-Football key in ⚙️ Settings to enable this feature</p>
     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer">
       <input type="checkbox" id="tipsDebugToggle" style="width:auto" onchange="window.SE_DEBUG_ENABLED=this.checked">
@@ -797,10 +796,13 @@ function setProgress(title,text,p){document.getElementById('tipsProgress').style
 // relays the request and attaches the missing CORS headers to the response.
 const CORS_PROXY='https://corsproxy.io/?url=';
 
-// Free tier allows only 10 requests/minute (6.5s gap minimum).
-// We pace at 1 request every 6.5 seconds and retry once on a 429 with backoff.
+// API-Football Pro plan allows 300 requests/minute (5 req/sec). We pace at
+// 220ms between calls (~4.5 req/sec) — comfortably under the hard cap so a
+// brief network jitter doesn't risk tripping the firewall block mentioned in
+// API-Football's rate-limit docs, while still being ~30x faster than the old
+// free-tier 6.5s pace. This app is Pro-only, so there's no free-tier fallback.
 let SE_LAST_CALL=0;
-const SE_MIN_GAP_MS=6500;
+const SE_MIN_GAP_MS=220;
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
@@ -818,7 +820,7 @@ async function cancellableSleep(ms){
 }
 
 async function afFetch(ep,isRetry){
-  // Enforce minimum gap since the last request
+  // Enforce minimum gap since the last request (Pro-tier pace)
   const now=Date.now();
   const wait=SE_LAST_CALL+SE_MIN_GAP_MS-now;
   if(tipsCancelled)throw new SECancelled();
@@ -848,13 +850,30 @@ async function afFetch(ep,isRetry){
   }
 }
 
-// Verify the API key works before running the full scan
+// Verify the API key works before running the full scan.
+// Also auto-detects paid plans (e.g. Pro) from the live subscription data
+// so the user doesn't have to remember to flip the Settings checkbox —
+// the checkbox is kept as a manual override/fallback only.
 async function verifyAfKey(){
   try{
     const d=await afFetch('/status');
     const sub=d.response&&d.response.subscription;
     const reqs=d.response&&d.response.requests;
-    if(sub){return{ok:true,plan:sub.plan,remaining:reqs?(reqs.limit_day-reqs.current):null};}
+    const limitDay=reqs?reqs.limit_day:null;
+    if(sub){
+      const planName=(sub.plan||'').toLowerCase();
+      const isPaidPlan=planName!=='free'&&planName!=='';
+      if(isPaidPlan){
+        window.SE_PAID_TIER=true;
+        window.SE_API_LIMIT_DAY=limitDay;
+        try{
+          localStorage.setItem('se_paid_tier','true');
+          const cb=document.getElementById('paidTierToggle');
+          if(cb)cb.checked=true;
+        }catch{}
+      }
+      return{ok:true,plan:sub.plan,remaining:limitDay?(limitDay-reqs.current):null,isPaidPlan};
+    }
     if(d.errors&&Object.keys(d.errors).length>0)return{ok:false,msg:JSON.stringify(d.errors)};
     return{ok:true};
   }catch(e){return{ok:false,msg:e.message};}
@@ -996,14 +1015,10 @@ async function fetchDailyTips(){
     // This maximises quality within the API call budget — but ALL leagues are eligible
     allFixtures.sort((a,b)=>leagueTier(b.league.id)-leagueTier(a.league.id));
 
-    // Process up to 25 fixtures within the free API budget
-    // Each fixture = 2 stat calls (home + away) so 25 fixtures = 50 calls max
-    // We have 100/day — this leaves headroom for injury calls and retries
-    // Capped at 12 fixtures (24 stat calls) to keep the scan under ~3 minutes
-    // given the free tier's 10 requests/minute limit (6.5s required between calls)
-    // 15 fixtures × 2 calls = 30 stat calls. With the season fix below (1 attempt
-    // instead of 2), this now takes roughly the same time the old 12-fixture version did.
-    const toProcess=allFixtures.slice(0,15);
+    // Process up to 25 fixtures (was 15 on free tier). Each fixture = 2 stat
+    // calls (home + away), so 25 fixtures = 50 calls, well within Pro's daily
+    // limit. With the fast paid-tier pacing this stays quick even at 25.
+    const toProcess=allFixtures.slice(0,25);
 
     setProgress('Step 1 of 4 — Fetching fixtures',
       'Found '+total+' fixtures worldwide. Processing top '+toProcess.length+' by league quality…',15);
@@ -1105,7 +1120,8 @@ async function fetchDailyTips(){
 
     setProgress('Step 3 of 4 — Checking injuries','Fetching injury and suspension reports…',62);
     const injuryMap={};
-    for(let i=0;i<Math.min(matchData.length,6);i++){
+    const injuryCheckCount=window.SE_PAID_TIER?Math.min(matchData.length,15):Math.min(matchData.length,6);
+    for(let i=0;i<injuryCheckCount;i++){
       if(tipsCancelled)throw new SECancelled();
       const f=matchData[i].fixture;
       try{const inj=await afFetch('/injuries?fixture='+f.fixture.id);injuryMap[f.fixture.id]=inj.response||[];}
@@ -1183,6 +1199,29 @@ function buildTipPrediction(md,injuryMap){
   const hasStats=!!(homeAtk&&homeDef&&awayAtk&&awayDef);
   // No real stats — skip this match entirely rather than faking a prediction
   if(!hasStats)return null;
+  // Sample size reliability gate — a team with only a handful of games played
+  // can produce a deceptively concentrated, "high confidence" Poisson output
+  // purely from small-sample noise (e.g. 2 games at 3-0 looks identical to the
+  // model as 20 games averaging 3-0). Without this, thin-data fixtures can
+  // outrank genuinely well-supported predictions — this is the main source of
+  // "slop" in the rankings. Games played comes from the same fixtures.played
+  // block already used elsewhere in the scan.
+  const gp=(statsObj,context)=>{
+    const fp=statsObj&&statsObj.fixtures&&statsObj.fixtures.played;
+    if(!fp)return 0;
+    return parseInt(fp[context]||fp.total||0,10)||0;
+  };
+  const homeGP=gp(md.home,hCtx)||gp(md.home,'total');
+  const awayGP=gp(md.away,aCtx)||gp(md.away,'total');
+  const minGP=Math.min(homeGP,awayGP);
+  // Hard gate: below 5 games played for either side, the sample is too thin
+  // to trust at all — skip rather than show a falsely confident scoreline.
+  const MIN_SAMPLE_GAMES=5;
+  if(minGP<MIN_SAMPLE_GAMES)return null;
+  // Soft penalty: scale confidence down for samples that clear the hard gate
+  // but are still thin (5-10 games), so they rank below similarly-shaped
+  // predictions backed by a fuller season's data. Reaches full weight (1.0) at 10+ games.
+  const sampleReliability=Math.min(1,(minGP-MIN_SAMPLE_GAMES)/5+0.5);
   // Sanity clamp — stops outlier stats distorting the model
   const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
   const hAtk=clamp(homeAtk,0.3,5.0);
@@ -1200,20 +1239,27 @@ function buildTipPrediction(md,injuryMap){
   const matrix=buildMatrix(lHome,lAway,6);
   const outcomes=calcOutcomes(matrix,6);
   const top=topN(matrix,6,6);
+  // Confidence is discounted by sample reliability so thin-data fixtures
+  // can't outrank well-supported ones purely on raw Poisson concentration.
+  const rawConfidence=top[0].p;
+  const confidence=rawConfidence*sampleReliability;
   const detail='Expected goals: '+hName+' '+lHome.toFixed(2)+' — '+aName+' '+lAway.toFixed(2)
-    +'\n\nSeason stats (per game):\n  '+hName+': '+hAtk.toFixed(2)+' scored, '+hDef.toFixed(2)+' conceded (home)'
+    +'\n\nSeason stats (per game, '+homeGP+' games '+hName+' / '+awayGP+' games '+aName+'):\n  '+hName+': '+hAtk.toFixed(2)+' scored, '+hDef.toFixed(2)+' conceded (home)'
     +'\n  '+aName+': '+aAtk.toFixed(2)+' scored, '+aDef.toFixed(2)+' conceded (away)'
     +'\n\nOutcome probabilities:\n  '+hName+' win: '+pct(outcomes.hw)
     +'\n  Draw: '+pct(outcomes.d)
     +'\n  '+aName+' win: '+pct(outcomes.aw)
     +(injuryTags.length?'\n\nInjury/doubt flags:\n  '+injuryTags.join('\n  '):'')
     +'\n\nVenue: '+(venue==='neutral'?'Neutral — home advantage removed':'Standard home/away')+(isIntl?' (International fixture — stats from qualifying/tournament games)':'')
-    +'\nLeague tier: '+tier+'/100 (tiebreaker only)';
-  return{homeName:hName,awayName:aName,leagueName,country,ko,venue,lHome,lAway,top,outcomes,confidence:top[0].p,injuryTags,hasStats,tier,detail};
+    +'\nLeague tier: '+tier+'/100 (tiebreaker only)'
+    +(sampleReliability<1?'\n⚠️ Reduced confidence weighting — limited sample size ('+minGP+' games)':'');
+  return{homeName:hName,awayName:aName,leagueName,country,ko,venue,lHome,lAway,top,outcomes,confidence,rawConfidence,minGP,injuryTags,hasStats,tier,detail};
 }
 function renderTips(tips,date,totalFound,eligibleCount){
   const ds=new Date(date).toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
-  let html='<div style="margin-bottom:16px"><div class="tips-date">📅 '+ds+'</div><div class="tips-meta">Top '+tips.length+' predictions from '+(eligibleCount||totalFound||'?')+' matches analysed · Confidence ranked · Incl. World Cup + confidence</div></div>';
+  const tierTag=window.SE_PAID_TIER?'⚡ Pro plan — current season data':'Free plan — 2024 season data';
+  const genTime=new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+  let html='<div style="margin-bottom:16px"><div class="tips-date">📅 '+ds+'</div><div class="tips-meta">Top '+tips.length+' predictions from '+(eligibleCount||totalFound||'?')+' matches analysed · Confidence ranked · '+tierTag+' · Generated '+genTime+'</div></div>';
   tips.forEach((t,i)=>{
     const rank=i+1;const rc=rank===1?'tip-rank-1':rank===2?'tip-rank-2':rank===3?'tip-rank-3':'tip-rank-n';
     const cp=(t.confidence*100).toFixed(1);const cc=t.confidence>0.18?'conf-high':t.confidence>0.12?'conf-med':'conf-low';const col=t.confidence>0.18?'var(--green)':t.confidence>0.12?'var(--draw)':'var(--orange)';
