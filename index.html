@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v16</span>
+    <span class="badge">v18</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -267,7 +267,7 @@ th{color:var(--muted);font-weight:700}
     <div class="card-title">🔥 Today's Top 10 Predicted Scorelines</div>
     <p class="section-sub">AI scans every league worldwide, runs Poisson on live team stats, factors in injuries and venue type, then ranks the 10 most confident scoreline predictions for today.</p>
     <div class="grid2" style="margin-bottom:12px">
-      <div><label>League Filter</label><select id="tipsLeagueFilter"><option value="all">All Leagues Worldwide</option><option value="major">Major Leagues Only</option><option value="europe">European Leagues</option></select></div>
+      <div><label>League Filter</label><select id="tipsLeagueFilter"><option value="all">All Leagues Worldwide</option><option value="major">Top Leagues Only</option><option value="europe">European Leagues</option></select></div>
       <div><label>Confidence Level</label><select id="tipsConfidence"><option value="any">Show All</option><option value="med" selected>Medium+</option><option value="high">High Only</option></select></div>
     </div>
     <div style="display:flex;gap:8px">
@@ -939,9 +939,66 @@ const RELIABLE_LEAGUES=new Set([
 // International team IDs — these use different stat endpoints
 const INTERNATIONAL_LEAGUES=new Set([1,17,9,10,29,30,32,34,777]);
 
-// Tier used ONLY as a tiebreaker when confidence scores are equal
-const LEAGUE_TIERS={1:100,2:95,3:92,39:90,140:90,135:90,78:90,61:90,94:85,88:85,71:80,307:80,253:75,848:90,119:70,292:70,197:68,203:68,207:68,262:65,210:65,144:65,235:65,218:65,233:65,17:60,40:75,41:70,42:68,43:65,383:78,239:72,244:60,271:70,496:65};
-function leagueTier(id){return LEAGUE_TIERS[id]||30;}
+// Tier scores for all leagues in RELIABLE_LEAGUES — used as tiebreaker when
+// confidence scores are equal. Every reliable league is explicitly listed here
+// so the default fallback of 30 never appears in normal operation.
+const LEAGUE_TIERS={
+  // World Cup & major international
+  1:100, 17:60, 9:55, 10:55, 29:55, 30:55, 32:55, 34:55, 777:55,
+  // UEFA club competitions
+  2:95, 3:92, 848:90,
+  // AFC Champions League
+  960:72, 961:70,
+  // England
+  39:90, 40:75, 41:70, 42:65, 43:60,
+  // Spain
+  140:90, 141:72, 142:65, 143:60,
+  // Italy
+  135:90, 136:70,
+  // Germany
+  78:90, 79:72,
+  // France
+  61:90, 62:70,
+  // Portugal
+  94:85, 95:68,
+  // Netherlands
+  88:82, 89:65,
+  // Belgium
+  144:65, 145:58,
+  // Russia
+  235:65,
+  // Turkey
+  203:68,
+  // Saudi Pro League
+  307:80,
+  // USA MLS
+  253:75, 254:65,
+  // Brazil
+  71:80, 72:68,
+  // Argentina
+  383:78, 128:65,
+  // Mexico
+  262:65, 263:58,
+  // Japan
+  119:70, 120:62,
+  // South Korea
+  292:68,
+  // Norway, Sweden
+  169:62, 113:60,
+  // Scotland
+  239:72, 179:62,
+  // Romania, Greece, Hungary, Ukraine, Czech
+  207:65, 197:65, 210:63, 218:63, 233:63,
+  // Denmark, Finland
+  271:62, 244:60,
+  // UAE
+  496:62,
+  // Morocco
+  268:62,
+  // Colombia
+  257:62,
+};
+function leagueTier(id){return LEAGUE_TIERS[id]||10;}
 function mHomeName(f){return f.teams.home.name;}
 function mAwayName(f){return f.teams.away.name;}
 
@@ -995,9 +1052,12 @@ async function fetchDailyTips(){
   try{
     setProgress('Step 1 of 4 — Fetching fixtures','Scanning all leagues for today’s matches…',8);
     const fd=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
-    // Filter to scheduled fixtures in selected leagues
-    // Get all scheduled fixtures — no pre-filtering by league
-    // Let the Poisson model decide what's worth predicting, not a hardcoded list
+    // Filter to scheduled fixtures in selected leagues.
+    // All leagues are eligible — the tier sort below ensures well-known leagues
+    // get their stat calls first within the 25-fixture budget. Unknown leagues
+    // fall to tier 10 (bottom of the sort) so they only appear if slots remain
+    // after all recognised leagues are processed. The 5-game sample gate in
+    // buildTipPrediction then filters out any thin-data results regardless of league.
     let allFixtures=(fd.response||[])
       .filter(f=>lf==='all'||leagueIds.includes(f.league.id))
       .filter(f=>['NS','TBD'].includes(f.fixture.status.short));
