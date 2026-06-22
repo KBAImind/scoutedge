@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v19</span>
+    <span class="badge">v6.1.0</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -1274,18 +1274,16 @@ async function fetchDailyTips(){
     leagueSummary.sort((a,b)=>b.tier-a.tier);
     window.SE_LEAGUE_SUMMARY=leagueSummary; // expose for debug panel
 
-    // Warn if the majority of processable fixtures are from low-tier leagues
+    // Process up to 25 fixtures — each = 2 stat calls (home + away)
+    const toProcess=allFixtures.slice(0,25);
+
+    // Warn if the majority of processable fixtures are from low-tier/unknown leagues
     const unknownInTop=toProcess.filter(f=>leagueTier(f.league.id)<=10).length;
     if(unknownInTop>toProcess.length*0.5){
       const existing=document.getElementById('tipsErr').textContent;
       document.getElementById('tipsErr').textContent=(existing?existing+' ':'')+
         '⚠️ Most fixtures today are from unrecognised leagues (tier 10). Major European leagues are likely on a break. Results may be from lower-tier competitions — check the League Inspector in Debug for details.';
     }
-
-    // Process up to 25 fixtures (was 15 on free tier). Each fixture = 2 stat
-    // calls (home + away), so 25 fixtures = 50 calls, well within Pro's daily
-    // limit. With the fast paid-tier pacing this stays quick even at 25.
-    const toProcess=allFixtures.slice(0,25);
 
     setProgress('Step 1 of 4 — Fetching fixtures',
       'Found '+total+' fixtures worldwide. Processing top '+toProcess.length+' by league quality…',15);
