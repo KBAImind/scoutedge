@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.0.0</span>
+    <span class="badge">v6.1.0</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -1231,27 +1231,42 @@ async function fetchDailyTips(){
   if(keyCheck.remaining!==null&&keyCheck.remaining<10){
     document.getElementById('tipsErr').textContent='⚠️ Only '+keyCheck.remaining+' API calls remaining today. Results may be limited.';
   }
-  const today=new Date().toISOString().slice(0,10);
+  const now=new Date();
+  const today=now.toISOString().slice(0,10);
+  const tomorrow=new Date(now.getTime()+86400000).toISOString().slice(0,10);
   const lf=document.getElementById('tipsLeagueFilter').value;
   const cf=document.getElementById('tipsConfidence').value;
   const leagueIds=AF_LEAGUES[lf]||AF_LEAGUES.all;
   try{
-    setProgress('Step 1 of 4 — Fetching fixtures','Scanning all leagues for today’s matches…',8);
-    const fd=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
-    // Filter to scheduled fixtures in selected leagues.
-    // All leagues are eligible — the tier sort below ensures well-known leagues
-    // get their stat calls first within the 25-fixture budget. Unknown leagues
-    // fall to tier 10 (bottom of the sort) so they only appear if slots remain
-    // after all recognised leagues are processed. The 5-game sample gate in
-    // buildTipPrediction then filters out any thin-data results regardless of league.
-    let allFixtures=(fd.response||[])
+    setProgress('Step 1 of 4 — Fetching fixtures','Scanning all leagues for upcoming matches…',8);
+    // Fetch today and tomorrow sequentially — parallel calls would burst the
+    // rate limiter since both fire before either updates SE_LAST_CALL.
+    const fdToday=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
+    const fdTomorrow=await afFetch('/fixtures?date='+tomorrow+'&timezone=Europe/London');
+    const allResponse=[...(fdToday.response||[]),...(fdTomorrow.response||[])];
+
+    // Filter to fixtures that:
+    // 1. Match the selected league filter
+    // 2. Have a kickoff time strictly in the future — we use the actual timestamp
+    //    rather than relying solely on API status, because lower-tier league statuses
+    //    can lag hours (a 17:30 game can still show as NS at 21:30).
+    let allFixtures=allResponse
       .filter(f=>lf==='all'||leagueIds.includes(f.league.id))
-      .filter(f=>['NS','TBD'].includes(f.fixture.status.short));
+      .filter(f=>{
+        const ko=f.fixture.date?new Date(f.fixture.date):null;
+        const isFuture=ko&&ko>now;
+        // Explicitly whitelist only genuinely scheduled statuses.
+        // PST=Postponed, CANC=Cancelled, ABD=Abandoned, AWD=Awarded, WO=Walkover
+        // are all excluded — a postponed game can still have a future timestamp
+        // if the API hasn't updated the date yet, so status check is essential.
+        const isScheduled=['NS','TBD'].includes(f.fixture.status.short);
+        return isFuture&&isScheduled;
+      });
 
     const total=allFixtures.length;
 
     if(!total){
-      document.getElementById('tipsErr').textContent='No fixtures returned by the API for today ('+today+'). This usually means the API key has no requests left, or there genuinely are no scheduled matches in this filter today.';
+      document.getElementById('tipsErr').textContent='No upcoming fixtures found for today or tomorrow ('+today+' / '+tomorrow+'). This usually means the API key has no requests left, or there genuinely are no scheduled matches in this filter.';
       document.getElementById('tipsEmpty').style.display='block';
       document.getElementById('tipsProgress').style.display='none';
       return;
@@ -1262,14 +1277,14 @@ async function fetchDailyTips(){
     allFixtures.sort((a,b)=>leagueTier(b.league.id)-leagueTier(a.league.id));
 
     // Build a league summary for the debug panel — shows ID, name, tier and
-    // fixture count for everything found today. Useful for identifying unknown
+    // fixture count for everything found today/tomorrow. Useful for identifying unknown
     // leagues (tier 10) so their IDs can be added to LEAGUE_TIERS.
     const leagueSummary=[...new Map(
-      (fd.response||[])
+      allResponse
         .filter(f=>['NS','TBD'].includes(f.fixture.status.short))
         .map(f=>[f.league.id,{id:f.league.id,name:f.league.name,country:f.league.country,tier:leagueTier(f.league.id),count:0}])
     ).values()];
-    (fd.response||[]).filter(f=>['NS','TBD'].includes(f.fixture.status.short))
+    allResponse.filter(f=>['NS','TBD'].includes(f.fixture.status.short))
       .forEach(f=>{const l=leagueSummary.find(l=>l.id===f.league.id);if(l)l.count++;});
     leagueSummary.sort((a,b)=>b.tier-a.tier);
     window.SE_LEAGUE_SUMMARY=leagueSummary; // expose for debug panel
