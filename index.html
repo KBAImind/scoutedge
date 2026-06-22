@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v18</span>
+    <span class="badge">v19</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -939,64 +939,250 @@ const RELIABLE_LEAGUES=new Set([
 // International team IDs — these use different stat endpoints
 const INTERNATIONAL_LEAGUES=new Set([1,17,9,10,29,30,32,34,777]);
 
-// Tier scores for all leagues in RELIABLE_LEAGUES — used as tiebreaker when
-// confidence scores are equal. Every reliable league is explicitly listed here
-// so the default fallback of 30 never appears in normal operation.
+// Tier scores for all known leagues — used as tiebreaker when confidence scores
+// are equal. Higher = more prestigious. Unknown leagues fall to 10 (bottom).
 const LEAGUE_TIERS={
-  // World Cup & major international
-  1:100, 17:60, 9:55, 10:55, 29:55, 30:55, 32:55, 34:55, 777:55,
-  // UEFA club competitions
-  2:95, 3:92, 848:90,
-  // AFC Champions League
-  960:72, 961:70,
-  // England
-  39:90, 40:75, 41:70, 42:65, 43:60,
-  // Spain
-  140:90, 141:72, 142:65, 143:60,
-  // Italy
-  135:90, 136:70,
-  // Germany
-  78:90, 79:72,
-  // France
-  61:90, 62:70,
-  // Portugal
-  94:85, 95:68,
-  // Netherlands
-  88:82, 89:65,
-  // Belgium
-  144:65, 145:58,
-  // Russia
-  235:65,
-  // Turkey
-  203:68,
-  // Saudi Pro League
-  307:80,
-  // USA MLS
-  253:75, 254:65,
-  // Brazil
-  71:80, 72:68,
-  // Argentina
-  383:78, 128:65,
-  // Mexico
-  262:65, 263:58,
-  // Japan
-  119:70, 120:62,
-  // South Korea
-  292:68,
-  // Norway, Sweden
-  169:62, 113:60,
-  // Scotland
-  239:72, 179:62,
-  // Romania, Greece, Hungary, Ukraine, Czech
-  207:65, 197:65, 210:63, 218:63, 233:63,
-  // Denmark, Finland
-  271:62, 244:60,
-  // UAE
-  496:62,
-  // Morocco
-  268:62,
-  // Colombia
-  257:62,
+  // ── WORLD CUP & MAJOR INTERNATIONALS ───────────────────────────────────────
+  1:100,    // FIFA World Cup
+  17:60,    // World Cup Qualification (UEFA)
+  9:55,     // World Cup Qual (CONMEBOL)
+  10:55,    // World Cup Qual (AFC)
+  29:55,    // World Cup Qual (CAF)
+  30:55,    // World Cup Qual (CONCACAF)
+  32:55,    // World Cup Qual (OFC)
+  34:55,    // World Cup Qual (inter-conf playoff)
+  777:55,   // World Cup (women)
+  4:80,     // UEFA European Championship
+  6:75,     // Africa Cup of Nations
+  7:72,     // Copa America
+  // ── UEFA CLUB COMPETITIONS ─────────────────────────────────────────────────
+  2:95,     // UEFA Champions League
+  3:92,     // UEFA Europa League
+  848:88,   // UEFA Conference League
+  // ── AFC CLUB COMPETITIONS ──────────────────────────────────────────────────
+  960:72,   // AFC Champions League Elite
+  961:68,   // AFC Champions League Two
+  // ── ENGLAND ────────────────────────────────────────────────────────────────
+  39:90,    // Premier League
+  40:75,    // Championship
+  41:68,    // League One
+  42:62,    // League Two
+  43:58,    // National League
+  45:65,    // FA Cup
+  48:62,    // League Cup (Carabao)
+  // ── SPAIN ──────────────────────────────────────────────────────────────────
+  140:90,   // La Liga
+  141:72,   // La Liga 2
+  142:62,   // Segunda B (now Primera Federación)
+  143:58,   // Tercera División
+  556:62,   // Copa del Rey
+  // ── ITALY ──────────────────────────────────────────────────────────────────
+  135:90,   // Serie A
+  136:72,   // Serie B
+  137:60,   // Serie C
+  547:62,   // Coppa Italia
+  // ── GERMANY ────────────────────────────────────────────────────────────────
+  78:90,    // Bundesliga
+  79:74,    // 2. Bundesliga
+  80:62,    // 3. Liga
+  529:62,   // DFB Pokal
+  // ── FRANCE ─────────────────────────────────────────────────────────────────
+  61:88,    // Ligue 1
+  62:72,    // Ligue 2
+  63:60,    // National
+  526:60,   // Coupe de France
+  // ── PORTUGAL ───────────────────────────────────────────────────────────────
+  94:85,    // Primeira Liga
+  95:68,    // Segunda Liga
+  96:58,    // Terceira Liga
+  // ── NETHERLANDS ────────────────────────────────────────────────────────────
+  88:82,    // Eredivisie
+  89:65,    // Eerste Divisie
+  90:58,    // Tweede Divisie
+  // ── BELGIUM ────────────────────────────────────────────────────────────────
+  144:68,   // Pro League (Jupiler)
+  145:58,   // First Amateur Division
+  // ── TURKEY ─────────────────────────────────────────────────────────────────
+  203:70,   // Süper Lig
+  204:60,   // 1. Lig
+  // ── RUSSIA ─────────────────────────────────────────────────────────────────
+  235:65,   // Premier League
+  236:55,   // FNL
+  // ── UKRAINE ────────────────────────────────────────────────────────────────
+  333:62,   // Premier League
+  // ── NETHERLANDS (extra) / SWITZERLAND ──────────────────────────────────────
+  207:63,   // Super League (Switzerland)
+  208:55,   // Challenge League (Switzerland)
+  // ── SCOTLAND ───────────────────────────────────────────────────────────────
+  239:72,   // Premiership
+  240:60,   // Championship
+  241:55,   // League One
+  179:58,   // League Cup
+  // ── GREECE ─────────────────────────────────────────────────────────────────
+  197:65,   // Super League
+  198:55,   // Super League 2
+  // ── ROMANIA ────────────────────────────────────────────────────────────────
+  283:62,   // Liga 1
+  284:52,   // Liga 2
+  // ── HUNGARY ────────────────────────────────────────────────────────────────
+  210:60,   // OTP Bank Liga
+  // ── CZECH REPUBLIC ─────────────────────────────────────────────────────────
+  345:62,   // Czech Liga
+  346:52,   // Czech FNL
+  233:62,   // (alternate Czech Liga ID)
+  // ── AUSTRIA ────────────────────────────────────────────────────────────────
+  218:63,   // Bundesliga
+  219:53,   // 2. Liga
+  // ── DENMARK ────────────────────────────────────────────────────────────────
+  271:63,   // Superliga
+  272:53,   // 1st Division
+  // ── SWEDEN ─────────────────────────────────────────────────────────────────
+  113:62,   // Allsvenskan
+  114:52,   // Superettan
+  // ── NORWAY ─────────────────────────────────────────────────────────────────
+  103:62,   // Eliteserien
+  104:52,   // 1. divisjon
+  // ── FINLAND ────────────────────────────────────────────────────────────────
+  244:58,   // Veikkausliiga
+  245:48,   // Ykkönen
+  // ── POLAND ─────────────────────────────────────────────────────────────────
+  106:63,   // Ekstraklasa
+  107:53,   // I Liga
+  // ── CROATIA ────────────────────────────────────────────────────────────────
+  209:60,   // HNL
+  // ── SERBIA ─────────────────────────────────────────────────────────────────
+  286:58,   // Super Liga
+  // ── SLOVAKIA ───────────────────────────────────────────────────────────────
+  332:55,   // Super Liga
+  // ── SLOVENIA ───────────────────────────────────────────────────────────────
+  322:55,   // PrvaLiga
+  // ── BULGARIA ───────────────────────────────────────────────────────────────
+  172:58,   // First League
+  // ── ISRAEL ─────────────────────────────────────────────────────────────────
+  165:58,   // Premier League
+  // ── CYPRUS ─────────────────────────────────────────────────────────────────
+  // ── GEORGIA ────────────────────────────────────────────────────────────────
+  514:52,   // Erovnuli Liga (top division)
+  515:42,   // Erovnuli Liga 2
+  // ── ARMENIA ────────────────────────────────────────────────────────────────
+  370:45,   // Premier League
+  // ── AZERBAIJAN ─────────────────────────────────────────────────────────────
+  340:45,   // Premier League
+  // ── KAZAKHSTAN ─────────────────────────────────────────────────────────────
+  392:48,   // Premier League
+  // ── BELARUS ────────────────────────────────────────────────────────────────
+  116:48,   // Premier League
+  // ── MOLDOVA ────────────────────────────────────────────────────────────────
+  234:42,   // Super Liga
+  // ── ALBANIA ────────────────────────────────────────────────────────────────
+  168:48,   // Kategoria Superiore
+  // ── NORTH MACEDONIA ────────────────────────────────────────────────────────
+  267:42,   // First Football League
+  // ── BOSNIA ─────────────────────────────────────────────────────────────────
+  354:45,   // Premier League
+  // ── MONTENEGRO ─────────────────────────────────────────────────────────────
+  279:42,   // First League
+  // ── LATVIA ─────────────────────────────────────────────────────────────────
+  326:45,   // Virsliga
+  // ── LITHUANIA ──────────────────────────────────────────────────────────────
+  166:45,   // A lyga
+  // ── ESTONIA ────────────────────────────────────────────────────────────────
+  398:45,   // Meistriliiga
+  // ── LUXEMBOURG ─────────────────────────────────────────────────────────────
+  // ── ICELAND ────────────────────────────────────────────────────────────────
+  164:48,   // Úrvalsdeild
+  // ── FAROE ISLANDS ──────────────────────────────────────────────────────────
+  222:40,   // Premier League
+  // ── IRELAND ────────────────────────────────────────────────────────────────
+  357:52,   // League of Ireland Premier
+  // ── NORTHERN IRELAND ───────────────────────────────────────────────────────
+  384:48,   // NIFL Premiership
+  // ── WALES ──────────────────────────────────────────────────────────────────
+  112:48,   // Cymru Premier
+  // ── SAUDI ARABIA ───────────────────────────────────────────────────────────
+  307:78,   // Pro League
+  308:58,   // First Division
+  // ── UAE ────────────────────────────────────────────────────────────────────
+  496:60,   // Arabian Gulf League
+  // ── QATAR ──────────────────────────────────────────────────────────────────
+  28:60,    // Stars League (QSL)
+  // ── EGYPT ──────────────────────────────────────────────────────────────────
+  // ── MOROCCO ────────────────────────────────────────────────────────────────
+  200:58,   // Botola Pro
+  268:58,   // (alternate Morocco ID)
+  // ── ALGERIA ────────────────────────────────────────────────────────────────
+  405:52,   // Ligue Professionnelle
+  // ── TUNISIA ────────────────────────────────────────────────────────────────
+  202:52,   // Ligue 1
+  // ── SOUTH AFRICA ───────────────────────────────────────────────────────────
+  288:55,   // Premier Soccer League
+  // ── NIGERIA ────────────────────────────────────────────────────────────────
+  // ── GHANA ──────────────────────────────────────────────────────────────────
+  372:48,   // Premier League
+  // ── KENYA ──────────────────────────────────────────────────────────────────
+  484:42,   // Premier League
+  // ── ETHIOPIA ───────────────────────────────────────────────────────────────
+  594:38,   // Ethiopian Premier League
+  // ── TANZANIA ───────────────────────────────────────────────────────────────
+  705:38,   // NBC Premier League
+  // ── UGANDA ─────────────────────────────────────────────────────────────────
+  565:38,   // StarTimes Uganda Premier League
+  // ── USA ────────────────────────────────────────────────────────────────────
+  253:75,   // MLS
+  254:60,   // USL Championship
+  255:50,   // USL League One
+  // ── CANADA ─────────────────────────────────────────────────────────────────
+  321:58,   // Canadian Premier League
+  // ── MEXICO ─────────────────────────────────────────────────────────────────
+  262:68,   // Liga MX
+  263:55,   // Liga de Expansión
+  // ── BRAZIL ─────────────────────────────────────────────────────────────────
+  71:80,    // Série A
+  72:65,    // Série B
+  73:52,    // Série C
+  // ── ARGENTINA ──────────────────────────────────────────────────────────────
+  128:72,   // Liga Profesional
+  383:72,   // (alternate Argentina top div — keep both)
+  130:53,   // Primera Nacional
+  // ── COLOMBIA ───────────────────────────────────────────────────────────────
+  257:60,   // Liga BetPlay
+  // ── CHILE ──────────────────────────────────────────────────────────────────
+  265:60,   // Primera División
+  266:50,   // Primera B
+  // ── PERU ───────────────────────────────────────────────────────────────────
+  281:55,   // Liga 1
+  // ── ECUADOR ────────────────────────────────────────────────────────────────
+  301:55,   // LigaPro
+  // ── URUGUAY ────────────────────────────────────────────────────────────────
+  // ── PARAGUAY ───────────────────────────────────────────────────────────────
+  282:52,   // División de Honor
+  // ── VENEZUELA ──────────────────────────────────────────────────────────────
+  105:50,   // Primera División
+  // ── BOLIVIA ────────────────────────────────────────────────────────────────
+  // ── JAPAN ──────────────────────────────────────────────────────────────────
+  119:72,   // J1 League
+  120:60,   // J2 League
+  121:50,   // J3 League
+  // ── SOUTH KOREA ────────────────────────────────────────────────────────────
+  292:68,   // K League 1
+  293:55,   // K League 2
+  // ── CHINA ──────────────────────────────────────────────────────────────────
+  169:60,   // Chinese Super League (note: check vs Norway)
+  // ── AUSTRALIA ──────────────────────────────────────────────────────────────
+  188:58,   // A-League Men
+  // ── INDIA ──────────────────────────────────────────────────────────────────
+  323:52,   // Indian Super League
+  // ── IRAN ───────────────────────────────────────────────────────────────────
+  290:52,   // Persian Gulf Pro League
+  // ── IRAQ ───────────────────────────────────────────────────────────────────
+  // ── JORDAN ─────────────────────────────────────────────────────────────────
+  361:42,   // Pro League
+  // ── THAILAND ───────────────────────────────────────────────────────────────
+  296:50,   // Thai League 1
+  // ── INDONESIA ──────────────────────────────────────────────────────────────
+  317:48,   // Liga 1
+  // ── MALAYSIA ───────────────────────────────────────────────────────────────
+  // ── VIETNAM ────────────────────────────────────────────────────────────────
 };
 function leagueTier(id){return LEAGUE_TIERS[id]||10;}
 function mHomeName(f){return f.teams.home.name;}
@@ -1074,6 +1260,27 @@ async function fetchDailyTips(){
     // Sort by league tier so the most prestigious games get stat calls first
     // This maximises quality within the API call budget — but ALL leagues are eligible
     allFixtures.sort((a,b)=>leagueTier(b.league.id)-leagueTier(a.league.id));
+
+    // Build a league summary for the debug panel — shows ID, name, tier and
+    // fixture count for everything found today. Useful for identifying unknown
+    // leagues (tier 10) so their IDs can be added to LEAGUE_TIERS.
+    const leagueSummary=[...new Map(
+      (fd.response||[])
+        .filter(f=>['NS','TBD'].includes(f.fixture.status.short))
+        .map(f=>[f.league.id,{id:f.league.id,name:f.league.name,country:f.league.country,tier:leagueTier(f.league.id),count:0}])
+    ).values()];
+    (fd.response||[]).filter(f=>['NS','TBD'].includes(f.fixture.status.short))
+      .forEach(f=>{const l=leagueSummary.find(l=>l.id===f.league.id);if(l)l.count++;});
+    leagueSummary.sort((a,b)=>b.tier-a.tier);
+    window.SE_LEAGUE_SUMMARY=leagueSummary; // expose for debug panel
+
+    // Warn if the majority of processable fixtures are from low-tier leagues
+    const unknownInTop=toProcess.filter(f=>leagueTier(f.league.id)<=10).length;
+    if(unknownInTop>toProcess.length*0.5){
+      const existing=document.getElementById('tipsErr').textContent;
+      document.getElementById('tipsErr').textContent=(existing?existing+' ':'')+
+        '⚠️ Most fixtures today are from unrecognised leagues (tier 10). Major European leagues are likely on a break. Results may be from lower-tier competitions — check the League Inspector in Debug for details.';
+    }
 
     // Process up to 25 fixtures (was 15 on free tier). Each fixture = 2 stat
     // calls (home + away), so 25 fixtures = 50 calls, well within Pro's daily
@@ -1167,7 +1374,20 @@ async function fetchDailyTips(){
     // Show debug panel if enabled, regardless of outcome
     if(window.SE_DEBUG_ENABLED&&window.SE_DEBUG&&window.SE_DEBUG.captured){
       const dbg=window.SE_DEBUG;
-      let dbgText='FIXTURE TESTED: '+dbg.fixture+'\n\nREQUEST URL:\n'+(dbg.homeUrl||'n/a')+'\n\n';
+      // League inspector — always shown when debug is enabled
+      const ls=window.SE_LEAGUE_SUMMARY||[];
+      let dbgText='══ LEAGUE INSPECTOR (all scheduled fixtures today) ══\n';
+      dbgText+='Tier  │ ID     │ Fixtures │ League\n';
+      dbgText+='──────┼────────┼──────────┼──────────────────────────────────\n';
+      ls.forEach(l=>{
+        const tierStr=String(l.tier).padStart(5);
+        const idStr=String(l.id).padStart(6);
+        const countStr=String(l.count).padStart(8);
+        const flag=l.tier<=10?' ⚠️ UNKNOWN ID':l.tier<=30?' ↓ low tier':'';
+        dbgText+=tierStr+' │ '+idStr+' │ '+countStr+' │ '+l.name+' ('+l.country+')'+flag+'\n';
+      });
+      dbgText+='\n══ FIXTURE STAT REQUEST DEBUG ══\n';
+      dbgText+='FIXTURE TESTED: '+dbg.fixture+'\n\nREQUEST URL:\n'+(dbg.homeUrl||'n/a')+'\n\n';
       if(dbg.error){
         dbgText+='REQUEST FAILED WITH ERROR:\n'+dbg.error;
       } else {
