@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.1.0</span>
+    <span class="badge">v6.2.0</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -1354,18 +1354,23 @@ async function fetchDailyTips(){
         const aAcc={sf:0,sa:0,w:0,gp:0};
 
         const fetchIntlStats=async(teamId,acc)=>{
+          let callsMade=0;
+          const MAX_INTL_CALLS=8; // hard cap per team — worst case 16 calls per fixture
           for(const src of INTL_SOURCES){
-            // Early exit: once we have a meaningful weighted sample (equivalent
-            // to ~5 well-weighted games) stop fetching further sources.
-            // This prevents the worst-case 47-call-per-team scenario for teams
-            // with data in the first few sources.
-            if(acc.w>=5)break;
+            // Early exit conditions:
+            // 1. Hard call cap — never more than 8 calls per team
+            // 2. Soft threshold — acc.w>=3 means we have at least 3 weighted games
+            //    worth of data (e.g. a full WC group stage at weight 1.0), which is
+            //    enough for a meaningful Poisson input. The old threshold of 5 was
+            //    too high for tournament teams who only play 3 group games.
+            if(callsMade>=MAX_INTL_CALLS||acc.w>=3)break;
             for(const lid of src.leagues){
-              if(acc.w>=5)break;
+              if(callsMade>=MAX_INTL_CALLS||acc.w>=3)break;
               for(const season of src.seasons){
-                if(acc.w>=5)break;
+                if(callsMade>=MAX_INTL_CALLS||acc.w>=3)break;
                 try{
                   const res=await afFetch('/teams/statistics?league='+lid+'&season='+season+'&team='+teamId);
+                  callsMade++;
                   const r=res.response;
                   if(!r||!r.fixtures)continue;
                   const played=parseInt((r.fixtures.played&&r.fixtures.played.total)||0,10);
@@ -1378,7 +1383,7 @@ async function fetchDailyTips(){
                   acc.sa+=ga*src.weight;
                   acc.w+=perGameW;
                   acc.gp+=played;
-                }catch(e){}
+                }catch(e){callsMade++;}
               }
             }
           }
@@ -1460,13 +1465,11 @@ async function fetchDailyTips(){
       }
 
       // ── PLAYER DATA FETCH ─────────────────────────────────────────────────
-      // Fetch top players for both teams to (a) display on the tip card and
-      // (b) identify key players so their absence hits harder in injury weighting.
-      // We use /players?team=X&season=Y&league=Z and take the top 5 by rating
-      // with meaningful minutes played (≥ 45 min) as "key players".
-      // Fetched only for international fixtures and for club fixtures where we
-      // already have stats — avoids wasting calls on fixtures that will be skipped.
+      // Only fetch if we actually have stats — if homeStats/awayStats are null
+      // the fixture will be rejected by buildTipPrediction anyway, so player
+      // calls here would be pure waste.
       let homePlayers=[], awayPlayers=[];
+      if(homeStats&&awayStats){
       const playerLeagueId=f.league.id;
       // Use the season that actually returned stats for this league — clubs often
       // run on season 2025 (the 2025/26 season) even though currentYear is 2026.
@@ -1508,6 +1511,7 @@ async function fetchDailyTips(){
             .slice(0,5);
         }
       }catch(e){}
+      } // end if(homeStats&&awayStats) player fetch guard
 
       // Note: if stats are null here, buildTipPrediction will return null and
       // the match is skipped — no fake predictions ever shown
