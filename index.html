@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.2.0</span>
+    <span class="badge">v6.3.0</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -797,12 +797,11 @@ function setProgress(title,text,p){document.getElementById('tipsProgress').style
 const CORS_PROXY='https://corsproxy.io/?url=';
 
 // API-Football Pro plan allows 300 requests/minute (5 req/sec). We pace at
-// 220ms between calls (~4.5 req/sec) — comfortably under the hard cap so a
-// brief network jitter doesn't risk tripping the firewall block mentioned in
-// API-Football's rate-limit docs, while still being ~30x faster than the old
-// free-tier 6.5s pace. This app is Pro-only, so there's no free-tier fallback.
+// 150ms between calls (~6.5 req/sec) — the gap accounts for network latency
+// on top of the rate limit, since each call also incurs a CORS proxy round
+// trip. Total effective rate stays well under Pro's hard cap.
 let SE_LAST_CALL=0;
-const SE_MIN_GAP_MS=220;
+const SE_MIN_GAP_MS=150;
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
@@ -936,6 +935,59 @@ const RELIABLE_LEAGUES=new Set([
   233,                           // Czech Republic
 ]);
 
+// Leagues explicitly blocked from the scan regardless of tier.
+// These are competitions where predictions have no real value:
+// youth leagues, women's leagues (separate model needed), cup competitions
+// with mixed-tier opponents, amateur/regional tournaments, and sub-divisions
+// that are too granular to have reliable stats coverage.
+// IDs confirmed from live debug data — add new ones here as they appear.
+const BLOCKED_LEAGUES=new Set([
+  // ── YOUTH LEAGUES ──────────────────────────────────────────────────────────
+  740,   // Brasileiro U20 A (Brazil)
+  1128,  // Brasileiro U17 (Brazil)
+  1076,  // Catarinense U20 (Brazil)
+  // ── WOMEN'S LEAGUES ────────────────────────────────────────────────────────
+  1117,  // USL W League (USA)
+  549,   // Damallsvenskan (Sweden)
+  // ── CUP COMPETITIONS (mixed-tier opponents, unreliable form signal) ─────────
+  267,   // Copa Chile
+  661,   // Cup (Lithuania)
+  115,   // Svenska Cupen (Sweden)
+  167,   // Cup (Iceland)
+  491,   // Løgmanssteypid (Faroe Islands cup)
+  672,   // David Kipiani Cup (Georgia)
+  1113,  // Copa Venezuela
+  1035,  // Copa Rio (Brazil)
+  1097,  // Copa Espírito Santo (Brazil)
+  // ── AMATEUR / REGIONAL / STATE COMPETITIONS ────────────────────────────────
+  1067,  // Torneo Promocional Amateur (Argentina)
+  851,   // Carioca A2 (Brazil)
+  619,   // Mineiro - 2 (Brazil)
+  936,   // Catarinense - 2 (Brazil)
+  1148,  // Maranhense - 2 (Brazil)
+  592,   // Division 2 - Norra Götaland (Sweden)
+  597,   // Division 2 - Södra Götaland (Sweden)
+  596,   // Division 2 - Västra Götaland (Sweden)
+  593,   // Division 2 - Norra Svealand (Sweden)
+  595,   // Division 2 - Södra Svealand (Sweden)
+  563,   // Ettan - Norra (Sweden)
+  774,   // 3. Division - Girone 1 (Norway)
+  366,   // 1. Deild (Faroe Islands second tier)
+  481,   // Northern NSW NPL (Australia)
+  1090,  // NNSW League 1 (Australia)
+  // ── FRIENDLIES ─────────────────────────────────────────────────────────────
+  667,   // Friendlies Clubs (World) — results are meaningless for prediction
+  // ── VERY LOW TIER / INSUFFICIENT DATA ──────────────────────────────────────
+  652,   // Second League Group 2 (Russia)
+  929,   // League Two (China)
+  569,   // Premier League (Kyrgyzstan)
+  764,   // Premier League (Mongolia)
+  1031,  // Premier League (Bhutan)
+  968,   // Championnat D1 (Gabon)
+  256,   // USL League Two (USA — 4th tier)
+  489,   // USL League One (USA — 3rd tier, borderline)
+]);
+
 // International team IDs — these use different stat endpoints
 const INTERNATIONAL_LEAGUES=new Set([1,17,9,10,29,30,32,34,777]);
 
@@ -1062,7 +1114,8 @@ const LEAGUE_TIERS={
   165:58,   // Premier League
   // ── CYPRUS ─────────────────────────────────────────────────────────────────
   // ── GEORGIA ────────────────────────────────────────────────────────────────
-  514:52,   // Erovnuli Liga (top division)
+  327:52,   // Erovnuli Liga (top division) — confirmed ID from live debug
+  514:52,   // Erovnuli Liga (alternate ID — keep both)
   515:42,   // Erovnuli Liga 2
   // ── ARMENIA ────────────────────────────────────────────────────────────────
   370:45,   // Premier League
@@ -1124,6 +1177,8 @@ const LEAGUE_TIERS={
   // ── ETHIOPIA ───────────────────────────────────────────────────────────────
   594:38,   // Ethiopian Premier League
   // ── TANZANIA ───────────────────────────────────────────────────────────────
+  567:38,   // Ligi Kuu Bara (confirmed from live debug)
+  // ── TANZANIA ───────────────────────────────────────────────────────────────
   705:38,   // NBC Premier League
   // ── UGANDA ─────────────────────────────────────────────────────────────────
   565:38,   // StarTimes Uganda Premier League
@@ -1143,6 +1198,7 @@ const LEAGUE_TIERS={
   // ── ARGENTINA ──────────────────────────────────────────────────────────────
   128:72,   // Liga Profesional
   383:72,   // (alternate Argentina top div — keep both)
+  129:52,   // Primera Nacional (confirmed from live debug)
   130:53,   // Primera Nacional
   // ── COLOMBIA ───────────────────────────────────────────────────────────────
   257:60,   // Liga BetPlay
@@ -1177,6 +1233,10 @@ const LEAGUE_TIERS={
   // ── IRAQ ───────────────────────────────────────────────────────────────────
   // ── JORDAN ─────────────────────────────────────────────────────────────────
   361:42,   // Pro League
+  // ── LEBANON ────────────────────────────────────────────────────────────────
+  390:42,   // Premier League (confirmed from live debug)
+  // ── SYRIA ──────────────────────────────────────────────────────────────────
+  425:38,   // Premier League (confirmed from live debug)
   // ── THAILAND ───────────────────────────────────────────────────────────────
   296:50,   // Thai League 1
   // ── INDONESIA ──────────────────────────────────────────────────────────────
@@ -1252,6 +1312,7 @@ async function fetchDailyTips(){
     //    can lag hours (a 17:30 game can still show as NS at 21:30).
     let allFixtures=allResponse
       .filter(f=>lf==='all'||leagueIds.includes(f.league.id))
+      .filter(f=>!BLOCKED_LEAGUES.has(f.league.id))
       .filter(f=>{
         const ko=f.fixture.date?new Date(f.fixture.date):null;
         const isFuture=ko&&ko>now;
@@ -1465,11 +1526,12 @@ async function fetchDailyTips(){
       }
 
       // ── PLAYER DATA FETCH ─────────────────────────────────────────────────
-      // Only fetch if we actually have stats — if homeStats/awayStats are null
-      // the fixture will be rejected by buildTipPrediction anyway, so player
-      // calls here would be pure waste.
+      // Player fetches are currently disabled — each fixture costs 2 extra calls
+      // (home + away) which adds ~40s to the scan for no meaningful gain since
+      // player ratings are unreliably populated outside the top 5 leagues.
+      // Re-enable by uncommenting the fetch block below when API speed improves.
       let homePlayers=[], awayPlayers=[];
-      if(homeStats&&awayStats){
+      if(false&&homeStats&&awayStats){
       const playerLeagueId=f.league.id;
       // Use the season that actually returned stats for this league — clubs often
       // run on season 2025 (the 2025/26 season) even though currentYear is 2026.
