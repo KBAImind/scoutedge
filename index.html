@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.3.0</span>
+    <span class="badge">v6.4.0</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -1776,7 +1776,46 @@ function buildTipPrediction(md,injuryMap){
   const matrix=buildMatrix(lHome,lAway,6);
   const outcomes=calcOutcomes(matrix,6);
   const top=topN(matrix,6,6);
-  const rawConfidence=top[0].p;
+
+  // ── SCORELINE SELECTION — >8% THRESHOLD ──────────────────────────────────
+  // Old approach: always pick the peak of the Poisson distribution.
+  // Problem: Poisson naturally concentrates on low scores, so 0-0, 1-0 and
+  // 1-1 almost always win even when the model expects a higher-scoring game.
+  // New approach: only consider scorelines with >8% individual probability,
+  // then pick the highest among those. This filters out the tail of the
+  // distribution while still finding the most likely *meaningful* outcome.
+  // If nothing clears 8% (very even or very open game), fall back to peak.
+  const THRESHOLD=0.08;
+  const aboveThreshold=top.filter(s=>s.p>=THRESHOLD);
+  const predicted=aboveThreshold.length>0?aboveThreshold[0]:top[0];
+
+  // ── COMBINED CONFIDENCE SCORE ─────────────────────────────────────────────
+  // Old: confidence = P(exact scoreline) — rewards boring low-score picks
+  // because 0-0 and 1-0 always have the highest individual probability.
+  //
+  // New: confidence = (result_prob × 0.5) + (scoreline_proximity × 0.5)
+  //
+  // result_prob: probability that the predicted outcome (H/D/A) actually
+  //   happens — rewards the model for getting the direction right.
+  //
+  // scoreline_proximity: weighted sum of scorelines near the prediction.
+  //   Exact match = full weight (1.0)
+  //   Off by 1 total goal = partial weight (0.4)
+  //   Off by 2 total goals = small weight (0.15)
+  //   This rewards being in the right area even without an exact hit.
+  const predH=predicted.h, predA=predicted.a;
+  const resultProb=predH>predA?outcomes.hw:predH===predA?outcomes.d:outcomes.aw;
+
+  let proximityScore=0;
+  for(let h=0;h<=6;h++){
+    for(let a=0;a<=6;a++){
+      const diff=Math.abs(h-predH)+Math.abs(a-predA);
+      const w=diff===0?1.0:diff===1?0.4:diff===2?0.15:0;
+      if(w>0)proximityScore+=matrix[h][a]*w;
+    }
+  }
+
+  const rawConfidence=(resultProb*0.5)+(proximityScore*0.5);
   const confidence=rawConfidence*sampleReliability;
 
   // Format player display for tip cards and detail view
@@ -1798,13 +1837,19 @@ function buildTipPrediction(md,injuryMap){
     +'\n\nOutcome probabilities:\n  '+hName+' win: '+pct(outcomes.hw)
     +'\n  Draw: '+pct(outcomes.d)
     +'\n  '+aName+' win: '+pct(outcomes.aw)
+    +'\n\nConfidence breakdown:'
+    +'\n  Result direction: '+pct(resultProb)+' ('+( predH>predA?hName+' win':predH===predA?'Draw':aName+' win')+')'
+    +'\n  Scoreline proximity score: '+pct(proximityScore)
+    +'\n  Combined confidence: '+pct(rawConfidence)+(sampleReliability<1?' (penalised for sample size)':'')
+    +'\n  Predicted via: '+(aboveThreshold.length>0?'above-8% threshold ('+aboveThreshold.length+' scorelines qualified)':'peak fallback — no scoreline cleared 8%')
     +(injuryTags.length?'\n\nInjury/doubt flags:\n  '+injuryTags.join('\n  '):'')
     +'\n\nVenue: '+(venue==='neutral'?'Neutral — home advantage removed':'Standard home/away')+(isIntl?' (International — stats weighted across all competitions)':'')
     +'\nLeague tier: '+tier+'/100 (tiebreaker only)'
     +(sampleReliability<1?'\n⚠️ Reduced confidence weighting — limited sample size ('+minGP+' competitive games)':'');
 
-  return{homeName:hName,awayName:aName,leagueName,country,ko,venue,lHome,lAway,top,outcomes,
-    confidence,rawConfidence,minGP,injuryTags,hasStats,tier,detail,
+  return{homeName:hName,awayName:aName,leagueName,country,ko,venue,lHome,lAway,
+    top,predicted,outcomes,confidence,rawConfidence,resultProb,proximityScore,
+    minGP,injuryTags,hasStats,tier,detail,
     homePlayers,awayPlayers,hTopPlayers,aTopPlayers,isIntl};
 }
 function renderTips(tips,date,totalFound,eligibleCount){
@@ -1820,7 +1865,7 @@ function renderTips(tips,date,totalFound,eligibleCount){
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div class="tip-rank ${rc}">${rank}</div><div style="text-align:right;font-size:10px;color:var(--dim)">${ko}</div></div>
       <div class="tip-competition">${t.leagueName}${t.country?' · '+t.country:''}</div>
       <div class="tip-teams"><div class="tip-team"><div class="tip-team-name">${t.homeName}</div>${t.hTopPlayers&&t.hTopPlayers.length?'<div style="font-size:9px;color:var(--dim);margin-top:4px;line-height:1.6">'+t.hTopPlayers.slice(0,2).map(p=>'⭐ '+p).join('<br>')+'</div>':''}</div><div class="tip-vs">vs</div><div class="tip-team"><div class="tip-team-name">${t.awayName}</div>${t.aTopPlayers&&t.aTopPlayers.length?'<div style="font-size:9px;color:var(--dim);margin-top:4px;line-height:1.6">'+t.aTopPlayers.slice(0,2).map(p=>'⭐ '+p).join('<br>')+'</div>':''}</div></div>
-      <div class="tip-scoreline"><div class="tip-score-val">${t.top[0].h} – ${t.top[0].a}</div><div class="tip-score-label">Predicted Scoreline</div></div>
+      <div class="tip-scoreline"><div class="tip-score-val">${t.predicted.h} – ${t.predicted.a}</div><div class="tip-score-label">Predicted Scoreline</div></div>
       <div class="tip-confidence"><div class="tip-conf-label">Confidence</div><div class="tip-conf-bar-wrap"><div class="tip-conf-bar" style="width:${Math.min(parseFloat(cp)*3,100)}%;background:${col}"></div></div><div class="tip-conf-pct ${cc}">${cp}%</div></div>
       <div style="margin-bottom:8px">
         <div class="bar-row" style="margin-bottom:5px"><div class="bar-label"><span style="font-size:10px">${t.homeName} Win</span><span style="font-size:10px">${pct(t.outcomes.hw)}</span></div><div class="bar-track" style="height:5px"><div class="bar-fill" style="width:${pct(t.outcomes.hw)};background:var(--win)"></div></div></div>
