@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.4.0</span>
+    <span class="badge">v6.5.0</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -270,6 +270,10 @@ th{color:var(--muted);font-weight:700}
       <div><label>League Filter</label><select id="tipsLeagueFilter"><option value="all">All Leagues Worldwide</option><option value="major">Top Leagues Only</option><option value="europe">European Leagues</option></select></div>
       <div><label>Confidence Level</label><select id="tipsConfidence"><option value="any">Show All</option><option value="med" selected>Medium+</option><option value="high">High Only</option></select></div>
     </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer">
+      <input type="checkbox" id="todayOnlyToggle" style="width:auto">
+      <span style="font-size:12px;color:var(--dim)">Today only <span style="color:var(--muted);font-size:11px">— uncheck to include tomorrow's fixtures</span></span>
+    </label>
     <div style="display:flex;gap:8px">
       <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
       <button class="btn btn-ghost" id="tipsCancelBtn" onclick="cancelDailyTips()" style="display:none;flex:0 0 auto;width:auto;padding:12px 18px">✕ Cancel</button>
@@ -1298,11 +1302,11 @@ async function fetchDailyTips(){
   const cf=document.getElementById('tipsConfidence').value;
   const leagueIds=AF_LEAGUES[lf]||AF_LEAGUES.all;
   try{
+    const todayOnly=document.getElementById('todayOnlyToggle').checked;
     setProgress('Step 1 of 4 — Fetching fixtures','Scanning all leagues for upcoming matches…',8);
-    // Fetch today and tomorrow sequentially — parallel calls would burst the
-    // rate limiter since both fire before either updates SE_LAST_CALL.
+    // Fetch today always; fetch tomorrow only if today-only toggle is off
     const fdToday=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
-    const fdTomorrow=await afFetch('/fixtures?date='+tomorrow+'&timezone=Europe/London');
+    const fdTomorrow=todayOnly?{response:[]}:await afFetch('/fixtures?date='+tomorrow+'&timezone=Europe/London');
     const allResponse=[...(fdToday.response||[]),...(fdTomorrow.response||[])];
 
     // Filter to fixtures that:
@@ -1729,7 +1733,7 @@ function buildTipPrediction(md,injuryMap){
   const hDef=clamp(homeDef,0.3,5.0);
   const aAtk=clamp(awayAtk,0.3,5.0);
   const aDef=clamp(awayDef,0.3,5.0);
-  let{lHome,lAway}=calcLambdas(hAtk,hDef,aAtk,aDef,lgH,lgA,venue);
+  let{lHome,lAway}=calcLambdas(hAtk,hDef,aAtk,aDef,lgH,lgA,venue,0,0,0,0,isIntl);
 
   // ── SMARTER INJURY WEIGHTING ──────────────────────────────────────────────
   // Old approach: flat 5% reduction per injured player, capped at 25%.
@@ -1860,9 +1864,12 @@ function renderTips(tips,date,totalFound,eligibleCount){
   tips.forEach((t,i)=>{
     const rank=i+1;const rc=rank===1?'tip-rank-1':rank===2?'tip-rank-2':rank===3?'tip-rank-3':'tip-rank-n';
     const cp=(t.confidence*100).toFixed(1);const cc=t.confidence>0.18?'conf-high':t.confidence>0.12?'conf-med':'conf-low';const col=t.confidence>0.18?'var(--green)':t.confidence>0.12?'var(--draw)':'var(--orange)';
-    const ko=t.ko?new Date(t.ko).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'TBD';
+    const koDate=t.ko?new Date(t.ko):null;
+    const koTime=koDate?koDate.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'TBD';
+    const koDay=koDate?koDate.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'}):'';
+    const koDisplay=koDate?(koDay+' · '+koTime):'TBD';
     html+=`<div class="tip-card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div class="tip-rank ${rc}">${rank}</div><div style="text-align:right;font-size:10px;color:var(--dim)">${ko}</div></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div class="tip-rank ${rc}">${rank}</div><div style="text-align:right;font-size:10px;color:var(--dim)">${koDisplay}</div></div>
       <div class="tip-competition">${t.leagueName}${t.country?' · '+t.country:''}</div>
       <div class="tip-teams"><div class="tip-team"><div class="tip-team-name">${t.homeName}</div>${t.hTopPlayers&&t.hTopPlayers.length?'<div style="font-size:9px;color:var(--dim);margin-top:4px;line-height:1.6">'+t.hTopPlayers.slice(0,2).map(p=>'⭐ '+p).join('<br>')+'</div>':''}</div><div class="tip-vs">vs</div><div class="tip-team"><div class="tip-team-name">${t.awayName}</div>${t.aTopPlayers&&t.aTopPlayers.length?'<div style="font-size:9px;color:var(--dim);margin-top:4px;line-height:1.6">'+t.aTopPlayers.slice(0,2).map(p=>'⭐ '+p).join('<br>')+'</div>':''}</div></div>
       <div class="tip-scoreline"><div class="tip-score-val">${t.predicted.h} – ${t.predicted.a}</div><div class="tip-score-label">Predicted Scoreline</div></div>
@@ -2089,9 +2096,44 @@ function applyVenue(lHome,lAway,venue,lgHome,lgAway){
   return{lHome,lAway};
 }
 
-function calcLambdas(homeAtk,homeDef,awayAtk,awayDef,lgH,lgA,venue,haAdj=0,hdAdj=0,aaAdj=0,adAdj=0){
-  let lHome=(homeAtk/lgH)*(awayDef/lgH)*lgH;
-  let lAway=(awayAtk/lgA)*(homeDef/lgA)*lgA;
+function calcLambdas(homeAtk,homeDef,awayAtk,awayDef,lgH,lgA,venue,haAdj=0,hdAdj=0,aaAdj=0,adAdj=0,isIntl=false){
+  let lHome,lAway;
+
+  if(isIntl){
+    // ── INTERNATIONAL LAMBDA CALCULATION ──────────────────────────────────
+    // The standard normalised formula (homeAtk/lgH)*(awayDef/lgH)*lgH breaks
+    // down for international fixtures because:
+    // 1. Stats are mixed across competitions with different goal rates
+    // 2. "League average" is meaningless when data spans WC, qualifiers, friendlies
+    // 3. Low conceded averages (e.g. 0.53/game) produce a suppression multiplier
+    //    of 0.39 that guts expected goals regardless of how much a team scores
+    //
+    // Direct approach: weight the team's own scoring average against the
+    // opponent's defensive average, giving equal weight to both signals.
+    // This respects that both Colombia scoring 2.17 AND Congo DR conceding
+    // 0.53 are real signals — the output should land between them, not
+    // collapse toward the lower value.
+    //
+    // Formula: lambda = 0.5*(homeAtk) + 0.5*(awayDef) adjusted toward mean
+    // Floor: never let defence suppress lambda below 0.5 * homeAtk
+    const homeAttackSignal=homeAtk;
+    const awayDefenceSignal=awayDef;
+    // Blend: 60% attack, 40% defence — attack is a slightly stronger signal
+    // for international games where defence stats include qualifier opponents
+    lHome=Math.max(homeAttackSignal*0.5, homeAttackSignal*0.6+awayDefenceSignal*0.4);
+    lAway=Math.max(awayAtk*0.5, awayAtk*0.6+homeDef*0.4);
+  } else {
+    // ── CLUB LAMBDA CALCULATION (standard Dixon-Coles) ─────────────────────
+    // Normalises both teams' stats against league averages to produce
+    // attack and defence strength ratings before computing expected goals.
+    // Add a floor so an extremely tight defence can't suppress expected goals
+    // below 40% of the attacking team's raw average.
+    const rawHome=(homeAtk/lgH)*(awayDef/lgH)*lgH;
+    const rawAway=(awayAtk/lgA)*(homeDef/lgA)*lgA;
+    lHome=Math.max(rawHome, homeAtk*0.4);
+    lAway=Math.max(rawAway, awayAtk*0.4);
+  }
+
   lHome*=1+haAdj/100-hdAdj/100;
   lAway*=1+aaAdj/100-adAdj/100;
   return applyVenue(lHome,lAway,venue,lgH,lgA);
