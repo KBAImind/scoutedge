@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.5.1</span>
+    <span class="badge">v6.6.0</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -1368,6 +1368,51 @@ async function fetchDailyTips(){
     setProgress('Step 1 of 4 — Fetching fixtures',
       'Found '+total+' fixtures worldwide. Processing top '+toProcess.length+' by league quality…',15);
 
+    // ── ODDS PRE-FETCH ────────────────────────────────────────────────────────
+    // Fetch bookmaker odds in one bulk call per sport key rather than per fixture.
+    // The Odds API returns all available matches for a sport in a single request,
+    // so we fetch the keys likely to cover today's fixtures and build a lookup map
+    // keyed by normalised team name pair. Only runs if the user has an Odds API key.
+    // Blend: 30% market implied probability / 70% Poisson — market calibrates
+    // direction without overriding the model's scoreline probability.
+    const oddsMap={}; // key: 'homeName|awayName' (normalised lowercase)
+    if(KEYS.oddsApi){
+      const oddsKeys=[
+        'soccer_fifa_world_cup','soccer_uefa_champs_league','soccer_epl',
+        'soccer_spain_la_liga','soccer_germany_bundesliga','soccer_italy_serie_a',
+        'soccer_france_ligue_one','soccer_netherlands_eredivisie',
+        'soccer_portugal_primeira_liga','soccer_brazil_campeonato',
+        'soccer_saudi_professional_league','soccer_turkey_super_league',
+        'soccer_usa_mls','soccer_japan_j_league','soccer_korea_kleague1',
+        'soccer_mexico_ligamx','soccer_australia_aleague',
+      ];
+      for(const key of oddsKeys){
+        try{
+          const r=await fetch('https://api.the-odds-api.com/v4/sports/'+key+'/odds/?apiKey='+KEYS.oddsApi+'&regions=uk&markets=h2h&oddsFormat=decimal');
+          if(!r.ok)continue;
+          const data=await r.json();
+          if(!Array.isArray(data))continue;
+          data.forEach(m=>{
+            // Convert decimal odds → implied probability, strip margin
+            const bk=m.bookmakers[0];
+            if(!bk)return;
+            const mkt=bk.markets.find(mk=>mk.key==='h2h');
+            if(!mkt)return;
+            const hw=mkt.outcomes.find(o=>o.name===m.home_team);
+            const aw=mkt.outcomes.find(o=>o.name===m.away_team);
+            const dr=mkt.outcomes.find(o=>o.name==='Draw');
+            if(!hw||!aw||!dr)return;
+            const raw={hw:1/hw.price,d:1/dr.price,aw:1/aw.price};
+            const total=raw.hw+raw.d+raw.aw;
+            // Normalise to sum to 1 (remove bookmaker margin)
+            oddsMap[m.home_team.toLowerCase().slice(0,8)+'|'+m.away_team.toLowerCase().slice(0,8)]={
+              hw:raw.hw/total, d:raw.d/total, aw:raw.aw/total
+            };
+          });
+        }catch(e){}
+      }
+    }
+
     const currentYear=new Date().getFullYear();
     // Free tier only serves stats for seasons 2022-2024 — current/previous year
     // always fails on free plans, wasting calls and time. Go straight to what works.
@@ -1527,6 +1572,34 @@ async function fetchDailyTips(){
         }
         // Store the season that worked so player fetch uses the same one
         f._resolvedSeason=resolvedSeason;
+
+        // ── RECENT FORM FETCH ───────────────────────────────────────────────
+        // Fetch last 10 fixtures for each club team and compute a form-weighted
+        // goals average. Blended 60% recent form / 40% full season stats.
+        // This replaces September's results carrying the same weight as last week.
+        // Only fetched when we have season stats (avoids wasting calls on fixtures
+        // that will be skipped by the sample gate anyway).
+        if(homeStats&&awayStats){
+          try{
+            const hForm=await afFetch('/fixtures?team='+f.teams.home.id+'&last=10&season='+resolvedSeason);
+            const aForm=await afFetch('/fixtures?team='+f.teams.away.id+'&last=10&season='+resolvedSeason);
+            const calcFormAvg=(fixtures,teamId,side)=>{
+              const finished=(fixtures.response||[]).filter(g=>g.fixture.status.short==='FT');
+              if(!finished.length)return null;
+              let gf=0,ga=0;
+              finished.forEach(g=>{
+                const isHome=g.teams.home.id===teamId;
+                gf+=isHome?g.goals.home:g.goals.away;
+                ga+=isHome?g.goals.away:g.goals.home;
+              });
+              return{scored:gf/finished.length,conceded:ga/finished.length,gp:finished.length};
+            };
+            const hRecent=calcFormAvg(hForm,f.teams.home.id,'home');
+            const aRecent=calcFormAvg(aForm,f.teams.away.id,'away');
+            if(hRecent){homeStats._recentScored=hRecent.scored;homeStats._recentConceded=hRecent.conceded;homeStats._recentGP=hRecent.gp;}
+            if(aRecent){awayStats._recentScored=aRecent.scored;awayStats._recentConceded=aRecent.conceded;awayStats._recentGP=aRecent.gp;}
+          }catch(e){}
+        }
       }
 
       // ── PLAYER DATA FETCH ─────────────────────────────────────────────────
@@ -1599,7 +1672,12 @@ async function fetchDailyTips(){
           }
         }catch(e){}
       }
-      matchData.push({fixture:f,home:homeStats,away:awayStats,tier:leagueTier(f.league.id),isIntl,homePlayers,awayPlayers,h2hData});
+      // Look up market odds for this fixture (pre-fetched above)
+      const hKey=f.teams.home.name.toLowerCase().slice(0,8);
+      const aKey=f.teams.away.name.toLowerCase().slice(0,8);
+      const fixtureOdds=oddsMap[hKey+'|'+aKey]||null;
+
+      matchData.push({fixture:f,home:homeStats,away:awayStats,tier:leagueTier(f.league.id),isIntl,homePlayers,awayPlayers,h2hData,odds:fixtureOdds});
       const remaining=toProcess.length-(i+1);
       const etaSec=Math.round(remaining*2*(SE_MIN_GAP_MS/1000));
       const etaText=etaSec>60?Math.ceil(etaSec/60)+' min left':etaSec+'s left';
@@ -1657,9 +1735,12 @@ async function fetchDailyTips(){
     });
 
     // Apply confidence filter
+    // Thresholds are calibrated to the three-factor confidence system:
+    // HIGH: all three signals must be strong — genuinely rare
+    // MED:  reasonable scoreline probability and outcome certainty
     let filtered=predictions;
-    if(cf==='high')filtered=predictions.filter(p=>p.confidence>0.18);
-    else if(cf==='med')filtered=predictions.filter(p=>p.confidence>0.10);
+    if(cf==='high')filtered=predictions.filter(p=>p.confidence>0.45);
+    else if(cf==='med')filtered=predictions.filter(p=>p.confidence>0.28);
 
     // Soft deduplicate — cap same scoreline at 3 appearances
     const scoreCount={};
@@ -1751,6 +1832,26 @@ function buildTipPrediction(md,injuryMap){
   let hDef=clamp(homeDef,0.3,5.0);
   let aAtk=clamp(awayAtk,0.3,5.0);
   let aDef=clamp(awayDef,0.3,5.0);
+
+  // ── RECENT FORM BLEND (club fixtures only) ────────────────────────────────
+  // 60% recent form (last 10 games) / 40% full season stats.
+  // Recent form is stored on the stats object by the fetch loop above.
+  // Not applied to international fixtures — tournament teams have too few
+  // recent games for this to be meaningful.
+  let formNote='';
+  if(!isIntl&&md.home&&md.home._recentScored!=null&&md.away&&md.away._recentScored!=null){
+    const hRS=clamp(md.home._recentScored,0.3,5.0);
+    const hRC=clamp(md.home._recentConceded,0.3,5.0);
+    const aRS=clamp(md.away._recentScored,0.3,5.0);
+    const aRC=clamp(md.away._recentConceded,0.3,5.0);
+    hAtk=(hAtk*0.4)+(hRS*0.6);
+    hDef=(hDef*0.4)+(hRC*0.6);
+    aAtk=(aAtk*0.4)+(aRS*0.6);
+    aDef=(aDef*0.4)+(aRC*0.6);
+    formNote='\n  Form (last '+md.home._recentGP+' games '+hName+' / '+md.away._recentGP+' games '+aName+') — 60% weight:'
+      +'\n  '+hName+': '+hRS.toFixed(2)+' scored, '+hRC.toFixed(2)+' conceded'
+      +'\n  '+aName+': '+aRS.toFixed(2)+' scored, '+aRC.toFixed(2)+' conceded';
+  }
 
   // ── HEAD-TO-HEAD BLENDING ─────────────────────────────────────────────────
   // Season stats tell us how a team performs on average across all opponents.
@@ -1854,50 +1955,106 @@ function buildTipPrediction(md,injuryMap){
     const keyOut=ai.filter(inj=>awayPlayers.find(kp=>kp.id===(inj.player&&inj.player.id)));
     injuryTags.push(aName+': '+ai.length+' doubt'+(ai.length>1?'s':'')+(keyOut.length?' (incl. '+keyOut.length+' key player'+(keyOut.length>1?'s':'')+')'  :''));
   }
-  const matrix=buildMatrix(lHome,lAway,6);
+  const rawMatrix=buildMatrix(lHome,lAway,6);
+  // Apply Dixon-Coles correction to the four low-scoring scorelines
+  const matrix=applyDixonColes(rawMatrix,lHome,lAway);
   const outcomes=calcOutcomes(matrix,6);
-  const top=topN(matrix,6,6);
+
+  // ── MARKET ODDS BLEND ─────────────────────────────────────────────────────
+  // If bookmaker odds are available for this fixture, blend the market's implied
+  // outcome probabilities with Poisson's outcome probabilities.
+  // Blend: 30% market / 70% Poisson — market calibrates direction without
+  // overriding the scoreline distribution.
+  // Method: scale the matrix rows to match blended outcome probabilities.
+  // This preserves the relative scoreline probabilities within each outcome
+  // while adjusting how much total probability sits in each result bucket.
+  let oddsNote='';
+  const mktOdds=md.odds||null;
+  let blendedMatrix=matrix;
+  let blendedOutcomes=outcomes;
+  if(mktOdds){
+    const blendedHW=(outcomes.hw*0.7)+(mktOdds.hw*0.3);
+    const blendedD=(outcomes.d*0.7)+(mktOdds.d*0.3);
+    const blendedAW=(outcomes.aw*0.7)+(mktOdds.aw*0.3);
+    // Scale matrix cells to match blended outcome totals
+    blendedMatrix=matrix.map((row,h)=>row.map((p,a)=>{
+      if(outcomes.hw>0&&h>a)return p*(blendedHW/outcomes.hw);
+      if(outcomes.d>0&&h===a)return p*(blendedD/outcomes.d);
+      if(outcomes.aw>0&&h<a)return p*(blendedAW/outcomes.aw);
+      return p;
+    }));
+    // Renormalise
+    let tot=0;
+    blendedMatrix.forEach(r=>r.forEach(p=>{tot+=p;}));
+    blendedMatrix=blendedMatrix.map(r=>r.map(p=>p/tot));
+    blendedOutcomes={hw:blendedHW,d:blendedD,aw:blendedAW};
+    oddsNote='\n\nMarket odds blend (30% market / 70% Poisson):'
+      +'\n  Market: '+hName+' win '+(mktOdds.hw*100).toFixed(1)+'% · Draw '+(mktOdds.d*100).toFixed(1)+'% · '+aName+' win '+(mktOdds.aw*100).toFixed(1)+'%'
+      +'\n  Blended: '+hName+' win '+(blendedHW*100).toFixed(1)+'% · Draw '+(blendedD*100).toFixed(1)+'% · '+aName+' win '+(blendedAW*100).toFixed(1)+'%';
+  }
+  const top=topN(blendedMatrix,6,6);
 
   // ── SCORELINE SELECTION — >8% THRESHOLD ──────────────────────────────────
-  // Old approach: always pick the peak of the Poisson distribution.
-  // Problem: Poisson naturally concentrates on low scores, so 0-0, 1-0 and
-  // 1-1 almost always win even when the model expects a higher-scoring game.
-  // New approach: only consider scorelines with >8% individual probability,
-  // then pick the highest among those. This filters out the tail of the
-  // distribution while still finding the most likely *meaningful* outcome.
-  // If nothing clears 8% (very even or very open game), fall back to peak.
+  // Only consider scorelines with >8% individual probability, then pick the
+  // highest among those. Falls back to peak if nothing clears 8%.
   const THRESHOLD=0.08;
   const aboveThreshold=top.filter(s=>s.p>=THRESHOLD);
   const predicted=aboveThreshold.length>0?aboveThreshold[0]:top[0];
-
-  // ── COMBINED CONFIDENCE SCORE ─────────────────────────────────────────────
-  // Old: confidence = P(exact scoreline) — rewards boring low-score picks
-  // because 0-0 and 1-0 always have the highest individual probability.
-  //
-  // New: confidence = (result_prob × 0.5) + (scoreline_proximity × 0.5)
-  //
-  // result_prob: probability that the predicted outcome (H/D/A) actually
-  //   happens — rewards the model for getting the direction right.
-  //
-  // scoreline_proximity: weighted sum of scorelines near the prediction.
-  //   Exact match = full weight (1.0)
-  //   Off by 1 total goal = partial weight (0.4)
-  //   Off by 2 total goals = small weight (0.15)
-  //   This rewards being in the right area even without an exact hit.
   const predH=predicted.h, predA=predicted.a;
-  const resultProb=predH>predA?outcomes.hw:predH===predA?outcomes.d:outcomes.aw;
 
+  // ── CONFIDENCE CALCULATION — THREE-FACTOR GATE ───────────────────────────
+  // Previous approach: (resultProb × 0.5) + (proximityScore × 0.5)
+  // Problem: this inflated every game. An evenly-matched 50/50 game scored
+  // 29% confidence. Virtually nothing failed the 18% HIGH threshold, making
+  // the label meaningless.
+  //
+  // New approach: three independent signals that each must be strong for a
+  // game to qualify as high confidence. All three are normalised to [0,1]
+  // and combined with weights that reflect their actual predictive value.
+  //
+  // Signal 1 — P(top scoreline): raw probability of the specific predicted
+  //   score. The single most honest measure of scoreline predictability.
+  //   A good game has >14%. Below 10% is noise.
+  //   Weight: 0.45
+  //
+  // Signal 2 — Outcome certainty: P(winning direction — home/draw/away).
+  //   If the model can't confidently say who wins, exact scoreline is a guess.
+  //   Normalised: (certainty - 0.33) / 0.67 so 33% (random) = 0, 100% = 1.
+  //   Weight: 0.35
+  //
+  // Signal 3 — Dominance ratio: how much more likely is top scoreline vs 2nd.
+  //   A 1.5x ratio = real separation. 1.0x = equally plausible alternatives.
+  //   Normalised: capped at 2.0x ratio → score 0 to 1.
+  //   Weight: 0.20
+  //
+  // Total xG penalty: high-scoring expected games (total xG > 2.8) are
+  //   fundamentally harder to pin to an exact score. Apply a scaling penalty.
+
+  const topScoreP=predicted.p;
+  const resultProb=predH>predA?blendedOutcomes.hw:predH===predA?blendedOutcomes.d:blendedOutcomes.aw;
+  const maxOutcome=Math.max(blendedOutcomes.hw,blendedOutcomes.d,blendedOutcomes.aw);
+  const second=top[1]||{p:0.001};
+  const dominanceRatio=Math.min(2.0,topScoreP/(second.p||0.001));
+
+  const sig1=Math.min(1,topScoreP/0.25);                         // normalised: 25% = max
+  const sig2=Math.max(0,(maxOutcome-0.33)/0.67);                 // normalised: certainty above random
+  const sig3=Math.min(1,(dominanceRatio-1.0)/1.0);               // normalised: 1x=0, 2x=1
+
+  const totalXG=lHome+lAway;
+  const xgPenalty=totalXG>2.8?Math.max(0.5,1-(totalXG-2.8)*0.1):1.0; // penalty above 2.8 xG
+
+  const rawConfidence=((sig1*0.45)+(sig2*0.35)+(sig3*0.20))*xgPenalty;
+  const confidence=rawConfidence*sampleReliability;
+
+  // Proximity score kept for display purposes only (shown in detail panel)
   let proximityScore=0;
   for(let h=0;h<=6;h++){
     for(let a=0;a<=6;a++){
       const diff=Math.abs(h-predH)+Math.abs(a-predA);
       const w=diff===0?1.0:diff===1?0.4:diff===2?0.15:0;
-      if(w>0)proximityScore+=matrix[h][a]*w;
+      if(w>0)proximityScore+=blendedMatrix[h][a]*w;
     }
   }
-
-  const rawConfidence=(resultProb*0.5)+(proximityScore*0.5);
-  const confidence=rawConfidence*sampleReliability;
 
   // Format player display for tip cards and detail view
   const fmtPlayers=(players)=>players.slice(0,3).map(p=>
@@ -1913,16 +2070,21 @@ function buildTipPrediction(md,injuryMap){
   const detail='Expected goals: '+hName+' '+lHome.toFixed(2)+' — '+aName+' '+lAway.toFixed(2)
     +'\n\n'+statsLabel+':\n  '+hName+': '+hAtk.toFixed(2)+' scored, '+hDef.toFixed(2)+' conceded'
     +'\n  '+aName+': '+aAtk.toFixed(2)+' scored, '+aDef.toFixed(2)+' conceded'
+    +formNote
     +h2hNote
+    +oddsNote
     +(hTopPlayers.length?'\n\nKey players — '+hName+':\n  '+hTopPlayers.join('\n  '):'')
     +(aTopPlayers.length?'\n\nKey players — '+aName+':\n  '+aTopPlayers.join('\n  '):'')
-    +'\n\nOutcome probabilities:\n  '+hName+' win: '+pct(outcomes.hw)
-    +'\n  Draw: '+pct(outcomes.d)
-    +'\n  '+aName+' win: '+pct(outcomes.aw)
-    +'\n\nConfidence breakdown:'
-    +'\n  Result direction: '+pct(resultProb)+' ('+( predH>predA?hName+' win':predH===predA?'Draw':aName+' win')+')'
-    +'\n  Scoreline proximity score: '+pct(proximityScore)
-    +'\n  Combined confidence: '+pct(rawConfidence)+(sampleReliability<1?' (penalised for sample size)':'')
+    +'\n\nOutcome probabilities (after all adjustments):\n  '+hName+' win: '+pct(blendedOutcomes.hw)
+    +'\n  Draw: '+pct(blendedOutcomes.d)
+    +'\n  '+aName+' win: '+pct(blendedOutcomes.aw)
+    +'\n  (Dixon-Coles correction applied to 0-0, 1-0, 0-1, 1-1)'
+    +'\n\nConfidence breakdown (three-factor model):'
+    +'\n  P(scoreline): '+(topScoreP*100).toFixed(1)+'% (signal 1, weight 45%)'
+    +'\n  Outcome certainty: '+(maxOutcome*100).toFixed(1)+'% → '+(sig2*100).toFixed(1)+'% normalised (signal 2, weight 35%)'
+    +'\n  Dominance ratio: '+dominanceRatio.toFixed(2)+'x → '+(sig3*100).toFixed(1)+'% normalised (signal 3, weight 20%)'
+    +(xgPenalty<1?'\n  Total xG penalty: '+totalXG.toFixed(1)+' xG → '+((1-xgPenalty)*100).toFixed(0)+'% penalty applied':'' )
+    +'\n  Combined confidence: '+(rawConfidence*100).toFixed(1)+'%'+(sampleReliability<1?' (penalised for sample size)':'')
     +'\n  Predicted via: '+(aboveThreshold.length>0?'above-8% threshold ('+aboveThreshold.length+' scorelines qualified)':'peak fallback — no scoreline cleared 8%')
     +(injuryTags.length?'\n\nInjury/doubt flags:\n  '+injuryTags.join('\n  '):'')
     +'\n\nVenue: '+(venue==='neutral'?'Neutral — home advantage removed':'Standard home/away')+(isIntl?' (International — stats weighted across all competitions)':'')
@@ -1930,7 +2092,7 @@ function buildTipPrediction(md,injuryMap){
     +(sampleReliability<1?'\n⚠️ Reduced confidence weighting — limited sample size ('+minGP+' competitive games)':'');
 
   return{homeName:hName,awayName:aName,leagueName,country,ko,venue,lHome,lAway,
-    top,predicted,outcomes,confidence,rawConfidence,resultProb,proximityScore,
+    top,predicted,outcomes:blendedOutcomes,confidence,rawConfidence,resultProb,proximityScore,
     minGP,injuryTags,hasStats,tier,detail,
     homePlayers,awayPlayers,hTopPlayers,aTopPlayers,isIntl};
 }
@@ -1941,7 +2103,7 @@ function renderTips(tips,date,totalFound,eligibleCount){
   let html='<div style="margin-bottom:16px"><div class="tips-date">📅 '+ds+'</div><div class="tips-meta">Top '+tips.length+' predictions from '+(eligibleCount||totalFound||'?')+' matches analysed · Confidence ranked · '+tierTag+' · Generated '+genTime+'</div></div>';
   tips.forEach((t,i)=>{
     const rank=i+1;const rc=rank===1?'tip-rank-1':rank===2?'tip-rank-2':rank===3?'tip-rank-3':'tip-rank-n';
-    const cp=(t.confidence*100).toFixed(1);const cc=t.confidence>0.18?'conf-high':t.confidence>0.12?'conf-med':'conf-low';const col=t.confidence>0.18?'var(--green)':t.confidence>0.12?'var(--draw)':'var(--orange)';
+    const cp=(t.confidence*100).toFixed(1);const cc=t.confidence>0.45?'conf-high':t.confidence>0.28?'conf-med':'conf-low';const col=t.confidence>0.45?'var(--green)':t.confidence>0.28?'var(--draw)':'var(--orange)';
     const koDate=t.ko?new Date(t.ko):null;
     const koTime=koDate?koDate.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'TBD';
     const koDay=koDate?koDate.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'}):'';
@@ -2154,6 +2316,33 @@ async function fetchOdds(home,away){
 // ═══════════════════════════════════════════════════
 function poisson(lam,k){if(lam<=0)return 0;let lp=-lam+k*Math.log(lam);for(let i=1;i<=k;i++)lp-=Math.log(i);return Math.exp(lp);}
 function buildMatrix(lh,la,max){return Array.from({length:max+1},(_,h)=>Array.from({length:max+1},(_,a)=>poisson(lh,h)*poisson(la,a)));}
+
+// Dixon-Coles correction — adjusts the four low-scoring scorelines (0-0, 1-0,
+// 0-1, 1-1) to correct a known bias in the independent Poisson model.
+// Basic Poisson underestimates draws and tight scorelines because it assumes
+// goals are fully independent, missing the tactical correlation in close games.
+// ρ (rho) = -0.05 is the empirically derived constant from the 1997 Dixon-Coles
+// paper, producing a small upward correction to 0-0 and 1-1, and small downward
+// correction to 1-0 and 0-1. Affects only these four scorelines; all others unchanged.
+function applyDixonColes(matrix,lh,la,rho=-0.05){
+  const m=matrix.map(r=>[...r]); // shallow copy — don't mutate original
+  const tau=(x,y,lh,la,rho)=>{
+    if(x===0&&y===0)return 1-lh*la*rho;
+    if(x===0&&y===1)return 1+lh*rho;
+    if(x===1&&y===0)return 1+la*rho;
+    if(x===1&&y===1)return 1-rho;
+    return 1;
+  };
+  // Apply correction to the four affected cells
+  [[0,0],[0,1],[1,0],[1,1]].forEach(([h,a])=>{
+    m[h][a]*=tau(h,a,lh,la,rho);
+  });
+  // Renormalise so probabilities still sum to 1
+  let total=0;
+  for(let h=0;h<=matrix.length-1;h++)for(let a=0;a<matrix[0].length;a++)total+=m[h][a];
+  for(let h=0;h<=matrix.length-1;h++)for(let a=0;a<matrix[0].length;a++)m[h][a]/=total;
+  return m;
+}
 function calcOutcomes(m,max){let hw=0,d=0,aw=0;for(let h=0;h<=max;h++)for(let a=0;a<=max;a++){if(h>a)hw+=m[h][a];else if(h===a)d+=m[h][a];else aw+=m[h][a];}return{hw,d,aw};}
 function topN(m,max,n=6){const s=[];for(let h=0;h<=max;h++)for(let a=0;a<=max;a++)s.push({h,a,p:m[h][a]});return s.sort((a,b)=>b.p-a.p).slice(0,n);}
 function pct(v){return(v*100).toFixed(1)+'%'}
