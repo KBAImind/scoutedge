@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.6.1</span>
+    <span class="badge">v6.6.2</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -1369,31 +1369,36 @@ async function fetchDailyTips(){
       'Found '+total+' fixtures worldwide. Processing top '+toProcess.length+' by league quality…',15);
 
     // ── ODDS PRE-FETCH ────────────────────────────────────────────────────────
-    // Fetch bookmaker odds in one bulk call per sport key rather than per fixture.
-    // The Odds API returns all available matches for a sport in a single request,
-    // so we fetch the keys likely to cover today's fixtures and build a lookup map
-    // keyed by normalised team name pair. Only runs if the user has an Odds API key.
-    // Blend: 30% market implied probability / 70% Poisson — market calibrates
-    // direction without overriding the model's scoreline probability.
-    const oddsMap={}; // key: 'homeName|awayName' (normalised lowercase)
+    // Map API-Football league IDs → Odds API sport keys for the leagues that
+    // actually have bookmaker coverage. Only fetch keys for leagues present in
+    // today's fixture list — avoids the previous approach of blasting 17 calls
+    // regardless of what's actually scheduled.
+    const LEAGUE_ODDS_KEY={
+      1:'soccer_fifa_world_cup', 2:'soccer_uefa_champs_league',
+      3:'soccer_uefa_europa', 39:'soccer_epl', 140:'soccer_spain_la_liga',
+      78:'soccer_germany_bundesliga', 135:'soccer_italy_serie_a',
+      61:'soccer_france_ligue_one', 88:'soccer_netherlands_eredivisie',
+      94:'soccer_portugal_primeira_liga', 71:'soccer_brazil_campeonato',
+      307:'soccer_saudi_professional_league', 203:'soccer_turkey_super_league',
+      253:'soccer_usa_mls', 119:'soccer_japan_j_league',
+      292:'soccer_korea_kleague1', 262:'soccer_mexico_ligamx',
+      188:'soccer_australia_aleague',
+    };
+    const oddsMap={};
     if(KEYS.oddsApi){
-      const oddsKeys=[
-        'soccer_fifa_world_cup','soccer_uefa_champs_league','soccer_epl',
-        'soccer_spain_la_liga','soccer_germany_bundesliga','soccer_italy_serie_a',
-        'soccer_france_ligue_one','soccer_netherlands_eredivisie',
-        'soccer_portugal_primeira_liga','soccer_brazil_campeonato',
-        'soccer_saudi_professional_league','soccer_turkey_super_league',
-        'soccer_usa_mls','soccer_japan_j_league','soccer_korea_kleague1',
-        'soccer_mexico_ligamx','soccer_australia_aleague',
-      ];
-      for(const key of oddsKeys){
+      // Find which sport keys are actually needed for today's fixtures
+      const neededKeys=new Set(
+        toProcess.map(f=>LEAGUE_ODDS_KEY[f.league.id]).filter(Boolean)
+      );
+      for(const key of neededKeys){
         try{
+          // Small delay between odds calls — Odds API has its own rate limit
+          await new Promise(r=>setTimeout(r,300));
           const r=await fetch('https://api.the-odds-api.com/v4/sports/'+key+'/odds/?apiKey='+KEYS.oddsApi+'&regions=uk&markets=h2h&oddsFormat=decimal');
           if(!r.ok)continue;
           const data=await r.json();
           if(!Array.isArray(data))continue;
           data.forEach(m=>{
-            // Convert decimal odds → implied probability, strip margin
             const bk=m.bookmakers[0];
             if(!bk)return;
             const mkt=bk.markets.find(mk=>mk.key==='h2h');
@@ -1404,9 +1409,8 @@ async function fetchDailyTips(){
             if(!hw||!aw||!dr)return;
             const raw={hw:1/hw.price,d:1/dr.price,aw:1/aw.price};
             const total=raw.hw+raw.d+raw.aw;
-            // Normalise to sum to 1 (remove bookmaker margin)
             oddsMap[m.home_team.toLowerCase().slice(0,8)+'|'+m.away_team.toLowerCase().slice(0,8)]={
-              hw:raw.hw/total, d:raw.d/total, aw:raw.aw/total
+              hw:raw.hw/total,d:raw.d/total,aw:raw.aw/total
             };
           });
         }catch(e){}
