@@ -247,7 +247,7 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.6.2</span>
+    <span class="badge">v6.6.4</span>
     <span class="badge badge-live" id="liveBadge">LIVE</span>
   </div>
   <div class="tabs">
@@ -270,6 +270,10 @@ th{color:var(--muted);font-weight:700}
       <div><label>League Filter</label><select id="tipsLeagueFilter"><option value="all">All Leagues Worldwide</option><option value="major">Top Leagues Only</option><option value="europe">European Leagues</option></select></div>
       <div><label>Confidence Level</label><select id="tipsConfidence"><option value="any">Show All</option><option value="med" selected>Medium+</option><option value="high">High Only</option></select></div>
     </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer">
+      <input type="checkbox" id="todayOnlyToggle" style="width:auto">
+      <span style="font-size:12px;color:var(--dim)">Today only <span style="color:var(--muted);font-size:11px">— uncheck to include tomorrow's fixtures</span></span>
+    </label>
     <div style="display:flex;gap:8px">
       <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
       <button class="btn btn-ghost" id="tipsCancelBtn" onclick="cancelDailyTips()" style="display:none;flex:0 0 auto;width:auto;padding:12px 18px">✕ Cancel</button>
@@ -797,11 +801,11 @@ function setProgress(title,text,p){document.getElementById('tipsProgress').style
 const CORS_PROXY='https://corsproxy.io/?url=';
 
 // API-Football Pro plan allows 300 requests/minute (5 req/sec hard limit).
-// 250ms between calls = 4 req/sec — 20% safety margin under the ceiling.
-// Previously 210ms (4.76 req/sec) was too close to the 200ms minimum and
-// caused intermittent rate limit errors due to clock jitter.
+// 210ms between calls = ~4.8 req/sec — safely under the ceiling with margin
+// for the CORS proxy and network jitter. Previously 150ms (6.7 req/sec) was
+// over the limit and causing intermittent rate limit errors mid-scan.
 let SE_LAST_CALL=0;
-const SE_MIN_GAP_MS=250;
+const SE_MIN_GAP_MS=210;
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
@@ -818,7 +822,7 @@ async function cancellableSleep(ms){
   }
 }
 
-async function afFetch(ep,retryCount=0){
+async function afFetch(ep,isRetry){
   // Enforce minimum gap since the last request (Pro-tier pace)
   const now=Date.now();
   const wait=SE_LAST_CALL+SE_MIN_GAP_MS-now;
@@ -835,19 +839,16 @@ async function afFetch(ep,retryCount=0){
     const d=await res.json();
     if(d&&d.errors&&Array.isArray(d.errors)===false&&Object.keys(d.errors).length>0){
       const errStr=JSON.stringify(d.errors);
-      // Rate limit hit — exponential backoff, up to 3 retries
-      // Backoff: 15s, 30s, 60s — covers the per-minute rolling window
-      if(retryCount<3&&/rate|too many requests/i.test(errStr)){
-        const backoff=[15000,30000,60000][retryCount];
-        await cancellableSleep(backoff);
+      // If rate-limited, wait longer and retry once automatically
+      if(!isRetry&&/rate|too many requests/i.test(errStr)){
+        await cancellableSleep(10000);
         SE_LAST_CALL=Date.now();
-        return afFetch(ep,retryCount+1);
+        return afFetch(ep,true);
       }
       throw new Error(errStr);
     }
     return d;
   }catch(e){
-    if(e instanceof SECancelled||e.name==='SECancelled')throw e;
     throw new Error('Could not reach API-Football: '+e.message);
   }
 }
@@ -1296,20 +1297,33 @@ async function fetchDailyTips(){
   }
   const now=new Date();
   const today=now.toISOString().slice(0,10);
+  const tomorrow=new Date(now.getTime()+86400000).toISOString().slice(0,10);
   const lf=document.getElementById('tipsLeagueFilter').value;
   const cf=document.getElementById('tipsConfidence').value;
   const leagueIds=AF_LEAGUES[lf]||AF_LEAGUES.all;
   try{
+    const todayOnly=document.getElementById('todayOnlyToggle').checked;
     setProgress('Step 1 of 4 — Fetching fixtures','Scanning all leagues for upcoming matches…',8);
-    const fd=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
-    const allFixturesRaw=fd.response||[];
+    // Fetch today always; fetch tomorrow only if today-only toggle is off
+    const fdToday=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
+    const fdTomorrow=todayOnly?{response:[]}:await afFetch('/fixtures?date='+tomorrow+'&timezone=Europe/London');
+    const allResponse=[...(fdToday.response||[]),...(fdTomorrow.response||[])];
 
-    let allFixtures=allFixturesRaw
+    // Filter to fixtures that:
+    // 1. Match the selected league filter
+    // 2. Have a kickoff time strictly in the future — we use the actual timestamp
+    //    rather than relying solely on API status, because lower-tier league statuses
+    //    can lag hours (a 17:30 game can still show as NS at 21:30).
+    let allFixtures=allResponse
       .filter(f=>lf==='all'||leagueIds.includes(f.league.id))
       .filter(f=>!BLOCKED_LEAGUES.has(f.league.id))
       .filter(f=>{
         const ko=f.fixture.date?new Date(f.fixture.date):null;
         const isFuture=ko&&ko>now;
+        // Explicitly whitelist only genuinely scheduled statuses.
+        // PST=Postponed, CANC=Cancelled, ABD=Abandoned, AWD=Awarded, WO=Walkover
+        // are all excluded — a postponed game can still have a future timestamp
+        // if the API hasn't updated the date yet, so status check is essential.
         const isScheduled=['NS','TBD'].includes(f.fixture.status.short);
         return isFuture&&isScheduled;
       });
@@ -1317,7 +1331,7 @@ async function fetchDailyTips(){
     const total=allFixtures.length;
 
     if(!total){
-      document.getElementById('tipsErr').textContent='No upcoming fixtures found for today ('+today+'). This usually means the API key has no requests left, or there genuinely are no scheduled matches in this filter today.';
+      document.getElementById('tipsErr').textContent='No upcoming fixtures found for today or tomorrow ('+today+' / '+tomorrow+'). This usually means the API key has no requests left, or there genuinely are no scheduled matches in this filter.';
       document.getElementById('tipsEmpty').style.display='block';
       document.getElementById('tipsProgress').style.display='none';
       return;
@@ -1327,13 +1341,15 @@ async function fetchDailyTips(){
     // This maximises quality within the API call budget — but ALL leagues are eligible
     allFixtures.sort((a,b)=>leagueTier(b.league.id)-leagueTier(a.league.id));
 
-    // Build a league summary for the debug panel
+    // Build a league summary for the debug panel — shows ID, name, tier and
+    // fixture count for everything found today/tomorrow. Useful for identifying unknown
+    // leagues (tier 10) so their IDs can be added to LEAGUE_TIERS.
     const leagueSummary=[...new Map(
-      allFixturesRaw
+      allResponse
         .filter(f=>['NS','TBD'].includes(f.fixture.status.short))
         .map(f=>[f.league.id,{id:f.league.id,name:f.league.name,country:f.league.country,tier:leagueTier(f.league.id),count:0}])
     ).values()];
-    allFixturesRaw.filter(f=>['NS','TBD'].includes(f.fixture.status.short))
+    allResponse.filter(f=>['NS','TBD'].includes(f.fixture.status.short))
       .forEach(f=>{const l=leagueSummary.find(l=>l.id===f.league.id);if(l)l.count++;});
     leagueSummary.sort((a,b)=>b.tier-a.tier);
     window.SE_LEAGUE_SUMMARY=leagueSummary; // expose for debug panel
