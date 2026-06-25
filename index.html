@@ -247,8 +247,8 @@ th{color:var(--muted);font-weight:700}
   <div class="header-top">
     <span class="logo-icon">◈</span>
     <span class="logo-text">ScoutEdge</span>
-    <span class="badge">v6.6.4</span>
-    <span class="badge badge-live" id="liveBadge">LIVE</span>
+    <span class="badge">v6.6.6</span>
+    <span class="badge badge-live" id="liveBadge">PROD</span>
   </div>
   <div class="tabs">
     <button class="tab" onclick="switchTab('tips',this)">🔥 Daily Tips</button>
@@ -270,10 +270,6 @@ th{color:var(--muted);font-weight:700}
       <div><label>League Filter</label><select id="tipsLeagueFilter"><option value="all">All Leagues Worldwide</option><option value="major">Top Leagues Only</option><option value="europe">European Leagues</option></select></div>
       <div><label>Confidence Level</label><select id="tipsConfidence"><option value="any">Show All</option><option value="med" selected>Medium+</option><option value="high">High Only</option></select></div>
     </div>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer">
-      <input type="checkbox" id="todayOnlyToggle" style="width:auto">
-      <span style="font-size:12px;color:var(--dim)">Today only <span style="color:var(--muted);font-size:11px">— uncheck to include tomorrow's fixtures</span></span>
-    </label>
     <div style="display:flex;gap:8px">
       <button class="btn btn-primary" id="tipsFetchBtn" onclick="fetchDailyTips()">🔥 Generate Today's Tips</button>
       <button class="btn btn-ghost" id="tipsCancelBtn" onclick="cancelDailyTips()" style="display:none;flex:0 0 auto;width:auto;padding:12px 18px">✕ Cancel</button>
@@ -794,18 +790,19 @@ const AF_LEAGUES={all:[39,140,135,78,61,94,88,40,41,42,43,71,307,253,1,2,3,848,1
 function updateTipsUI(){document.getElementById('tipsApiHint').style.display=KEYS.af?'none':'block';document.getElementById('tipsFetchBtn').disabled=!KEYS.af;}
 function setProgress(title,text,p){document.getElementById('tipsProgress').style.display='block';document.getElementById('tipsProgressTitle').textContent=title;document.getElementById('tipsProgressText').textContent=text;document.getElementById('tipsProgressBar').style.width=p+'%';}
 // api-sports.io does not send CORS headers, so direct browser calls are blocked.
-// We route through a free CORS proxy (corsproxy.io) which explicitly supports
-// GitHub Pages (.github.io) as a free origin. The API key still goes in the
-// x-apisports-key header exactly as api-sports.io requires — the proxy just
-// relays the request and attaches the missing CORS headers to the response.
-const CORS_PROXY='https://corsproxy.io/?url=';
+// Requests are routed through a dedicated Cloudflare Worker proxy which adds
+// the required CORS headers. This is rate-limit free and fully owned by you.
+const CORS_PROXIES=['https://mozart.kristian-barrett.workers.dev/?url='];
+let activeProxyIndex=0;
+function getCorsProxy(){return CORS_PROXIES[activeProxyIndex];}
+function switchProxy(){activeProxyIndex=(activeProxyIndex+1)%CORS_PROXIES.length;}
 
 // API-Football Pro plan allows 300 requests/minute (5 req/sec hard limit).
-// 210ms between calls = ~4.8 req/sec — safely under the ceiling with margin
-// for the CORS proxy and network jitter. Previously 150ms (6.7 req/sec) was
-// over the limit and causing intermittent rate limit errors mid-scan.
+// 250ms between calls = 4 req/sec — 20% safety margin under the ceiling.
+// Previously 210ms (4.76 req/sec) was too close to the 200ms minimum and
+// caused intermittent rate limit errors due to clock jitter.
 let SE_LAST_CALL=0;
-const SE_MIN_GAP_MS=210;
+const SE_MIN_GAP_MS=250;
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
@@ -822,7 +819,7 @@ async function cancellableSleep(ms){
   }
 }
 
-async function afFetch(ep,isRetry){
+async function afFetch(ep,retryCount=0){
   // Enforce minimum gap since the last request (Pro-tier pace)
   const now=Date.now();
   const wait=SE_LAST_CALL+SE_MIN_GAP_MS-now;
@@ -832,23 +829,43 @@ async function afFetch(ep,isRetry){
   SE_LAST_CALL=Date.now();
 
   const targetUrl='https://v3.football.api-sports.io'+ep;
-  const proxiedUrl=CORS_PROXY+encodeURIComponent(targetUrl);
+  const proxiedUrl=getCorsProxy()+encodeURIComponent(targetUrl);
   try{
     const res=await fetch(proxiedUrl,{method:'GET',headers:{'x-apisports-key':KEYS.af}});
+    // Handle HTTP 429 — could be from API-Football OR the CORS proxy itself.
+    // On first 429, try switching to the backup proxy before backing off.
+    if(res.status===429){
+      if(retryCount===0){
+        // Try the other proxy first before waiting
+        switchProxy();
+        await cancellableSleep(2000);
+        SE_LAST_CALL=Date.now();
+        return afFetch(ep,retryCount+1);
+      }
+      if(retryCount<3){
+        const backoff=[15000,30000,60000][retryCount-1];
+        await cancellableSleep(backoff);
+        SE_LAST_CALL=Date.now();
+        return afFetch(ep,retryCount+1);
+      }
+      throw new Error('Rate limit persists after retries. Wait 60s before trying again.');
+    }
     if(!res.ok)throw new Error('API error '+res.status);
     const d=await res.json();
     if(d&&d.errors&&Array.isArray(d.errors)===false&&Object.keys(d.errors).length>0){
       const errStr=JSON.stringify(d.errors);
-      // If rate-limited, wait longer and retry once automatically
-      if(!isRetry&&/rate|too many requests/i.test(errStr)){
-        await cancellableSleep(10000);
+      // JSON-level rate limit errors — same backoff
+      if(retryCount<3&&/rate|too many requests/i.test(errStr)){
+        const backoff=[15000,30000,60000][retryCount];
+        await cancellableSleep(backoff);
         SE_LAST_CALL=Date.now();
-        return afFetch(ep,true);
+        return afFetch(ep,retryCount+1);
       }
       throw new Error(errStr);
     }
     return d;
   }catch(e){
+    if(e instanceof SECancelled||e.name==='SECancelled')throw e;
     throw new Error('Could not reach API-Football: '+e.message);
   }
 }
@@ -1287,7 +1304,12 @@ async function fetchDailyTips(){
   setProgress('Verifying API key…','Checking your API-Football connection…',5);
   const keyCheck=await verifyAfKey();
   if(!keyCheck.ok){
-    document.getElementById('tipsErr').textContent='❌ API key error: '+keyCheck.msg+'. Go to ⚙️ Settings and re-enter your API-Football key.';
+    // Check if it's a rate limit issue — give more helpful message
+    const isRateLimit=/rate|429|too many/i.test(keyCheck.msg||'');
+    const errMsg=isRateLimit
+      ?'⏳ Rate limit hit. The app will automatically retry — please wait up to 60 seconds, or wait a minute and try again manually.'
+      :'❌ API key error: '+keyCheck.msg+'. Go to ⚙️ Settings and re-enter your API-Football key.';
+    document.getElementById('tipsErr').textContent=errMsg;
     document.getElementById('tipsProgress').style.display='none';
     tipsRunning=false;btn.disabled=false;btn.textContent='🔥 Generate Today’s Tips';
     return;
@@ -1302,28 +1324,30 @@ async function fetchDailyTips(){
   const cf=document.getElementById('tipsConfidence').value;
   const leagueIds=AF_LEAGUES[lf]||AF_LEAGUES.all;
   try{
-    const todayOnly=document.getElementById('todayOnlyToggle').checked;
     setProgress('Step 1 of 4 — Fetching fixtures','Scanning all leagues for upcoming matches…',8);
-    // Fetch today always; fetch tomorrow only if today-only toggle is off
+    // Fetch today's fixtures first
     const fdToday=await afFetch('/fixtures?date='+today+'&timezone=Europe/London');
-    const fdTomorrow=todayOnly?{response:[]}:await afFetch('/fixtures?date='+tomorrow+'&timezone=Europe/London');
-    const allResponse=[...(fdToday.response||[]),...(fdTomorrow.response||[])];
+    // Fetch tomorrow's fixtures — if this fails due to rate limiting,
+    // gracefully fall back to today only rather than killing the whole scan
+    let fdTomorrow={response:[]};
+    try{
+      fdTomorrow=await afFetch('/fixtures?date='+tomorrow+'&timezone=Europe/London');
+    }catch(e){
+      // Non-fatal — today's fixtures are enough to run a scan
+      if(!(e instanceof SECancelled||e.name==='SECancelled')){
+        document.getElementById('tipsErr').textContent='⚠️ Could not fetch tomorrow\'s fixtures ('+e.message.slice(0,60)+'). Showing today only.';
+      } else {
+        throw e;
+      }
+    }
+    const allFixturesRaw=[...(fdToday.response||[]),...(fdTomorrow.response||[])];
 
-    // Filter to fixtures that:
-    // 1. Match the selected league filter
-    // 2. Have a kickoff time strictly in the future — we use the actual timestamp
-    //    rather than relying solely on API status, because lower-tier league statuses
-    //    can lag hours (a 17:30 game can still show as NS at 21:30).
-    let allFixtures=allResponse
+    let allFixtures=allFixturesRaw
       .filter(f=>lf==='all'||leagueIds.includes(f.league.id))
       .filter(f=>!BLOCKED_LEAGUES.has(f.league.id))
       .filter(f=>{
         const ko=f.fixture.date?new Date(f.fixture.date):null;
         const isFuture=ko&&ko>now;
-        // Explicitly whitelist only genuinely scheduled statuses.
-        // PST=Postponed, CANC=Cancelled, ABD=Abandoned, AWD=Awarded, WO=Walkover
-        // are all excluded — a postponed game can still have a future timestamp
-        // if the API hasn't updated the date yet, so status check is essential.
         const isScheduled=['NS','TBD'].includes(f.fixture.status.short);
         return isFuture&&isScheduled;
       });
@@ -1331,7 +1355,7 @@ async function fetchDailyTips(){
     const total=allFixtures.length;
 
     if(!total){
-      document.getElementById('tipsErr').textContent='No upcoming fixtures found for today or tomorrow ('+today+' / '+tomorrow+'). This usually means the API key has no requests left, or there genuinely are no scheduled matches in this filter.';
+      document.getElementById('tipsErr').textContent='No upcoming fixtures found for today ('+today+'). This usually means the API key has no requests left, or there genuinely are no scheduled matches in this filter today.';
       document.getElementById('tipsEmpty').style.display='block';
       document.getElementById('tipsProgress').style.display='none';
       return;
@@ -1341,15 +1365,13 @@ async function fetchDailyTips(){
     // This maximises quality within the API call budget — but ALL leagues are eligible
     allFixtures.sort((a,b)=>leagueTier(b.league.id)-leagueTier(a.league.id));
 
-    // Build a league summary for the debug panel — shows ID, name, tier and
-    // fixture count for everything found today/tomorrow. Useful for identifying unknown
-    // leagues (tier 10) so their IDs can be added to LEAGUE_TIERS.
+    // Build a league summary for the debug panel
     const leagueSummary=[...new Map(
-      allResponse
+      allFixturesRaw
         .filter(f=>['NS','TBD'].includes(f.fixture.status.short))
         .map(f=>[f.league.id,{id:f.league.id,name:f.league.name,country:f.league.country,tier:leagueTier(f.league.id),count:0}])
     ).values()];
-    allResponse.filter(f=>['NS','TBD'].includes(f.fixture.status.short))
+    allFixturesRaw.filter(f=>['NS','TBD'].includes(f.fixture.status.short))
       .forEach(f=>{const l=leagueSummary.find(l=>l.id===f.league.id);if(l)l.count++;});
     leagueSummary.sort((a,b)=>b.tier-a.tier);
     window.SE_LEAGUE_SUMMARY=leagueSummary; // expose for debug panel
@@ -1996,7 +2018,7 @@ function buildTipPrediction(md,injuryMap){
       +'\n  Market: '+hName+' win '+(mktOdds.hw*100).toFixed(1)+'% · Draw '+(mktOdds.d*100).toFixed(1)+'% · '+aName+' win '+(mktOdds.aw*100).toFixed(1)+'%'
       +'\n  Blended: '+hName+' win '+(blendedHW*100).toFixed(1)+'% · Draw '+(blendedD*100).toFixed(1)+'% · '+aName+' win '+(blendedAW*100).toFixed(1)+'%';
   }
-  const top=topN(blendedMatrix,6,6);
+  const top=topN(blendedMatrix,6,10);
 
   // ── SCORELINE SELECTION — >8% THRESHOLD ──────────────────────────────────
   // Only consider scorelines with >8% individual probability, then pick the
@@ -2117,12 +2139,18 @@ function renderTips(tips,date,totalFound,eligibleCount){
     const domLabel=ratio>=1.8?'Strong pick — well clear of alternatives':ratio>=1.4?'Moderate edge over next best':ratio>=1.1?'Narrow edge — alternatives close behind':'Near-equal alternatives';
     const domCol=ratio>=1.8?'var(--green)':ratio>=1.4?'var(--draw)':'var(--orange)';
     const domHtml='<div style="font-size:9px;margin-top:4px;color:'+domCol+'">'+ratio.toFixed(2)+'&times; more likely than next best &middot; '+domLabel+'</div>';
-    // Alternative scoreline cards
-    const altCards=t.top.slice(0,3).map((s,si)=>{
+    // Alternative scoreline cards — show top 5 instead of 3
+    const altCards=t.top.slice(0,5).map((s,si)=>{
       const relStr=si===0?'':(s.p>0&&t.predicted.p>0?' &middot; '+(t.predicted.p/s.p).toFixed(1)+'&times; behind top':'');
       const border=si===0?'var(--accent)':'var(--border)';
       return '<div style="background:var(--bg2);border:1px solid '+border+';border-radius:8px;padding:7px;text-align:center"><div style="font-size:14px;font-weight:900;color:white">'+s.h+'&ndash;'+s.a+'</div><div style="font-size:9px;color:var(--muted);margin-top:2px">'+pct(s.p)+relStr+'</div></div>';
     }).join('');
+    // High-score spread note — surfaces meaningful probability at higher scorelines
+    // so you can see when a heavy win is plausible even if not the top pick
+    const highScoreProb=t.top.filter(s=>(s.h+s.a)>=4).reduce((acc,s)=>acc+s.p,0);
+    const highScoreNote=highScoreProb>=0.15
+      ?'<div style="font-size:9px;color:var(--draw);margin-top:6px;padding:4px 8px;background:rgba(255,200,0,0.08);border-radius:4px">⚡ '+(highScoreProb*100).toFixed(0)+'% combined probability on scorelines with 4+ total goals — heavy result possible</div>'
+      :'';
     html+=`<div class="tip-card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div class="tip-rank ${rc}">${rank}</div><div style="text-align:right;font-size:10px;color:var(--dim)">${koDisplay}</div></div>
       <div class="tip-competition">${t.leagueName}${t.country?' · '+t.country:''}</div>
@@ -2134,7 +2162,7 @@ function renderTips(tips,date,totalFound,eligibleCount){
         <div class="bar-row" style="margin-bottom:5px"><div class="bar-label"><span style="font-size:10px">Draw</span><span style="font-size:10px">${pct(t.outcomes.d)}</span></div><div class="bar-track" style="height:5px"><div class="bar-fill" style="width:${pct(t.outcomes.d)};background:var(--draw)"></div></div></div>
         <div class="bar-row"><div class="bar-label"><span style="font-size:10px">${t.awayName} Win</span><span style="font-size:10px">${pct(t.outcomes.aw)}</span></div><div class="bar-track" style="height:5px"><div class="bar-fill" style="width:${pct(t.outcomes.aw)};background:var(--lose)"></div></div></div>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">${altCards}</div>
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-bottom:8px">${altCards}</div>${highScoreNote}
       <div class="tip-meta-row">${t.venue!=='home'?'<span class="tip-tag tip-tag-venue">⚖️ Neutral venue</span>':''}${t.injuryTags.length?'<span class="tip-tag tip-tag-injury">🚑 '+t.injuryTags.length+' injury flag'+(t.injuryTags.length>1?'s':'')+'</span>':''}${t.isIntl?'<span class="tip-tag tip-tag-source">🌍 Multi-source intl stats</span>':'<span class="tip-tag tip-tag-source">'+(t.hasStats?'Live stats':'League avg')+'</span>'}</div>
       <button class="tip-expand-btn" onclick="toggleTipDetail(${i})">▼ Full analysis</button>
       <div class="tip-detail" id="tipDetail-${i}"><div class="tip-detail-text">${t.detail}</div></div>
